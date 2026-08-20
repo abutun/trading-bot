@@ -1,0 +1,9 @@
+ccxt>=4.3.0
+web3>=6.15.0
+eth-account>=0.10.0
+python-dotenv>=1.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Optional, only if using SECRET_MANAGER=aws
+# boto3>=1.28
