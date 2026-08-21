@@ -13,6 +13,7 @@ Target folder:
 You need:
 
 - Python 3.10 or newer
+- MySQL 8 (or MariaDB) for bot state — positions, trades, equity history
 - A terminal
 - Optional: Docker
 - Optional: AWS CLI / boto3 if using AWS Secrets Manager
@@ -29,9 +30,16 @@ If you need to install Python on macOS using Homebrew:
 brew install python@3.12
 ```
 
-## 2. Create project files
+Install MySQL locally (macOS example):
 
-If you used the provided creation script, all files should already exist in:
+```bash
+brew install mysql
+brew services start mysql
+```
+
+## 2. Project files
+
+All files live in:
 
 ```text
 /Users/ahmet/Documents/Workspaces/Buhane/trading-bot
@@ -49,16 +57,18 @@ Expected files include:
 requirements.txt
 .env.example
 Dockerfile
-main.py
-config.py
-models.py
-state.py
-risk.py
-strategy.py
-market_data.py
-backtest.py
-bot.py
-brokers/
+main.py           # CLI entry point: run the bot or a backtest
+dashboard.py      # monitoring dashboard entry point
+backtest.py       # historical backtest of the strategy
+config.py         # all settings, read from environment variables
+secrets.py        # secret loading (env / .env / AWS Secrets Manager)
+models.py         # data models (Signal, Position, Trade)
+state.py          # MySQL-backed state store (auto-creates tables)
+risk.py           # position sizing, drawdown kill-switch, daily loss limit
+strategy.py       # EMA crossover + RSI strategy with ATR stops
+market_data.py    # OHLCV data via ccxt
+brokers/          # venue adapters: binance_broker.py (ccxt), evm_broker.py (web3.py / MetaMask key), paper.py
+dashboard/        # Flask dashboard app + templates
 README.md
 SETUP.md
 ```
@@ -75,11 +85,6 @@ Create a virtual environment:
 
 ```bash
 python3 -m venv .venv
-```
-
-Activate it:
-
-```bash
 source .venv/bin/activate
 ```
 
@@ -96,17 +101,29 @@ If you plan to use AWS Secrets Manager:
 pip install boto3
 ```
 
-## 4. Configure environment variables
+## 4. Create the MySQL database
+
+Tables are created automatically by `state.py` on first run, but the database and user must exist:
+
+```bash
+mysql -u root -p
+```
+
+```sql
+CREATE DATABASE IF NOT EXISTS trading_bot;
+CREATE USER 'tradingbot'@'localhost' IDENTIFIED BY 'change-me';
+GRANT ALL PRIVILEGES ON trading_bot.* TO 'tradingbot'@'localhost';
+FLUSH PRIVILEGES;
+```
+
+Then set `MYSQL_USER` / `MYSQL_PASSWORD` in `.env`.
+
+## 5. Configure environment variables
 
 Create your local `.env` file:
 
 ```bash
 cp .env.example .env
-```
-
-Edit it:
-
-```bash
 nano .env
 ```
 
@@ -125,13 +142,12 @@ PAPER_INITIAL_CAPITAL=1000
 Then run:
 
 ```bash
-python3 main.py --backtest
 python3 main.py
 ```
 
 ### Live Binance configuration
 
-Example:
+Example (testnet first):
 
 ```bash
 BOT_MODE=live
@@ -152,9 +168,9 @@ Important:
 
 - Use testnet keys when `BINANCE_TESTNET=true`.
 - Use mainnet keys when `BINANCE_TESTNET=false`.
-- Enable only the permissions you need.
-- Disable withdrawals if possible.
-- Use IP allowlisting.
+- Enable only the permissions you need (spot trading).
+- Disable withdrawals on the API key.
+- Use IP allowlisting if available.
 
 ### Live EVM / MetaMask wallet configuration
 
@@ -175,12 +191,12 @@ EVM_SYMBOLS={"ETH/USDT":{"base":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","qu
 
 Important:
 
-- Use a dedicated hot wallet.
+- Use a **dedicated hot wallet** — never your main MetaMask wallet.
 - Keep only trading capital plus gas in that wallet.
 - Make sure the token addresses are correct for your chain.
-- For native ETH, use WETH as the base token unless you extend the broker to support native ETH swaps.
+- For native ETH, use WETH as the base token (the bot swaps ERC20 tokens via a DEX router).
 
-## 5. Environment variable reference
+## 6. Environment variable reference
 
 ### Core
 
@@ -235,13 +251,33 @@ Important:
 
 | Variable | Required | Description |
 |---|---:|---|
-| `EVM_PRIVATE_KEY` | Conditional | Required for live EVM trading |
-| `EVM_RPC_URL` | Conditional | Required for live EVM trading |
-| `EVM_CHAIN_ID` | No | Chain ID, default `1` |
-| `EVM_ROUTER_ADDRESS` | Conditional | Required for live EVM trading |
-| `EVM_GAS_PRICE_GWEI` | No | Optional fixed gas price in Gwei |
+| `EVM_PRIVATE_KEY` | Conditional | Required for live EVM trading (your MetaMask private key) |
+| `EVM_RPC_URL` | Conditional | Required for live EVM trading (Infura/Alchemy/public RPC) |
+| `EVM_CHAIN_ID` | No | Chain ID, default `1` (Ethereum mainnet) |
+| `EVM_ROUTER_ADDRESS` | Conditional | DEX router address (Uniswap V2 / PancakeSwap) |
+| `EVM_GAS_PRICE_GWEI` | No | Optional fixed gas price in Gwei; empty = use node suggestion |
 | `EVM_SLIPPAGE_BPS` | No | DEX slippage tolerance in basis points, default `50` |
-| `EVM_SYMBOLS` | Conditional | JSON mapping from symbol to ERC20 token addresses |
+| `EVM_SYMBOLS` | Conditional | JSON mapping from symbol to ERC20 token addresses (base/quote) |
+
+### MySQL state database
+
+| Variable | Required | Description |
+|---|---:|---|
+| `MYSQL_HOST` | No | MySQL host, default `127.0.0.1` |
+| `MYSQL_PORT` | No | MySQL port, default `3306` |
+| `MYSQL_USER` | Yes | Database user (tables auto-created) |
+| `MYSQL_PASSWORD` | Yes | Database password |
+| `MYSQL_DATABASE` | No | Database name, default `trading_bot` |
+
+### Monitoring dashboard
+
+| Variable | Required | Description |
+|---|---:|---|
+| `DASHBOARD_USERNAME` | No | Login username, default `admin` |
+| `DASHBOARD_PASSWORD` | Yes (for dashboard) | Login password |
+| `DASHBOARD_SECRET_KEY` | Yes (for dashboard) | Long random string for session cookies (`openssl rand -hex 32`) |
+| `DASHBOARD_HOST` | No | Bind address, default `127.0.0.1` |
+| `DASHBOARD_PORT` | No | Port, default `8080` |
 
 ### Secrets manager
 
@@ -257,18 +293,67 @@ Important:
 | `LOG_LEVEL` | No | Logging level, default `INFO` |
 | `LOG_FILE` | No | Optional log file path |
 
-## 6. Optional: AWS Secrets Manager
+## 7. Run the bot
+
+Paper trading (safe first run):
+
+```bash
+BOT_MODE=paper python3 main.py
+```
+
+Live trading:
+
+```bash
+BOT_MODE=live python3 main.py
+```
+
+Backtest the strategy on recent candles:
+
+```bash
+python3 main.py --backtest
+```
+
+The bot logs every loop: equity, signals, orders, and risk state. State (positions, trades, equity history) is persisted in MySQL, so the bot survives restarts.
+
+## 8. Run the monitoring dashboard
+
+In a second terminal:
+
+```bash
+python3 dashboard.py
+```
+
+Then open `http://127.0.0.1:8080` and sign in with `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`.
+
+The dashboard shows:
+
+- Live equity, daily PnL, peak equity and drawdown
+- Equity history chart (refreshes every 30 seconds)
+- Open positions with live prices and unrealized PnL
+- Recent trades (side, qty, price, fees)
+- Bot online/offline status (heartbeat-based)
+
+For remote access put it behind a reverse proxy with TLS, e.g. nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name bot.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+## 9. Optional: AWS Secrets Manager
 
 If you want to store secrets in AWS Secrets Manager instead of `.env`:
 
-1. Install boto3:
-
-```bash
-pip install boto3
-```
-
+1. Install boto3: `pip install boto3`
 2. Configure AWS credentials on the machine running the bot.
-
 3. Create a JSON secret, for example:
 
 ```json
@@ -286,59 +371,7 @@ SECRET_MANAGER=aws
 SECRET_ID=trading-bot/secrets
 ```
 
-The bot will load the secret into environment variables at startup.
-
-You can use a similar approach with GCP Secret Manager, HashiCorp Vault, Azure Key Vault, Doppler, or Infisical.
-
-## 7. Run backtest
-
-Run a simple backtest:
-
-```bash
-python3 main.py --backtest
-```
-
-Example output will show final equity and return for each configured pair.
-
-Important: this backtester is simple. For production decisions, use more rigorous walk-forward testing and out-of-sample validation.
-
-## 8. Run paper trading
-
-Make sure `.env` contains:
-
-```bash
-BOT_MODE=paper
-```
-
-Run:
-
-```bash
-python3 main.py
-```
-
-Paper trading uses simulated fills and stores state in `state.db`.
-
-## 9. Run live trading
-
-Make sure `.env` contains:
-
-```bash
-BOT_MODE=live
-```
-
-Run:
-
-```bash
-python3 main.py
-```
-
-Before live trading:
-
-- Run paper trading first.
-- Use small capital.
-- Monitor logs.
-- Verify balances and positions.
-- Test restart behavior.
+The bot loads the secret into environment variables at startup. You can use a similar approach with GCP Secret Manager, HashiCorp Vault, Azure Key Vault, Doppler, or Infisical.
 
 ## 10. Docker usage
 
@@ -348,16 +381,16 @@ Build:
 docker build -t trading-bot .
 ```
 
-Run with environment file:
+Run with environment file (bot):
 
 ```bash
 docker run --env-file .env trading-bot
 ```
 
-For backtest:
+Run the dashboard:
 
 ```bash
-docker run --env-file .env trading-bot python main.py --backtest
+docker run -p 8080:8080 --env-file .env trading-bot python dashboard.py
 ```
 
 ## 11. BSC / PancakeSwap example
@@ -391,11 +424,11 @@ EVM_RPC_URL=https://polygon-rpc.com
 EVM_CHAIN_ID=137
 ```
 
-Use a Polygon DEX router and Polygon token addresses in `EVM_SYMBOLS`.
+Use a Polygon DEX router (e.g. Uniswap V2 on Polygon: `0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D`) and Polygon token addresses in `EVM_SYMBOLS`.
 
 ## 13. Troubleshooting
 
-### `ModuleNotFoundError: No module named 'ccxt'`
+### `ModuleNotFoundError: No module named 'ccxt'` (or web3, flask)
 
 Activate the virtual environment and install dependencies:
 
@@ -404,52 +437,45 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### MySQL connection error on startup
+
+- Is MySQL running? `brew services start mysql` (macOS) or `systemctl status mysql`.
+- Do the user/database exist? See section 4.
+- Are `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD` correct in `.env`?
+
 ### Binance testnet authentication error
 
-Make sure you are using Binance testnet API keys when:
-
-```bash
-BINANCE_TESTNET=true
-```
-
-Use mainnet API keys only when:
-
-```bash
-BINANCE_TESTNET=false
-```
+Make sure you are using Binance **testnet** API keys when `BINANCE_TESTNET=true`, and mainnet keys only when `BINANCE_TESTNET=false`.
 
 ### EVM `Insufficient quote token balance`
 
-Make sure the wallet has enough of the quote token, for example USDC or USDT.
+Make sure the wallet has enough of the quote token (e.g. USDC or USDT) plus gas.
 
 ### EVM `Insufficient base token balance`
 
-Make sure the wallet has enough of the base token, for example WETH.
+Make sure the wallet has enough of the base token (e.g. WETH) to sell.
 
-### EVM transaction failed
-
-Check:
-
-- Gas balance
-- RPC connectivity
-- Token addresses
-- Router address
-- Chain ID
-- Slippage settings
-
-### No liquidity for buy/sell
+### EVM transaction failed / stuck
 
 Check:
 
-- Token addresses
-- Router address
-- Pair liquidity
-- Chain ID
-- Whether the tokens are supported by that router
+- Gas balance (native coin) in the wallet
+- RPC connectivity and rate limits
+- Token addresses for your chain
+- Router address supports the pair
+- Slippage settings (`EVM_SLIPPAGE_BPS`)
+
+### No liquidity for buy/sell on DEX
+
+Check token addresses, router address, pair liquidity, chain ID, and whether the tokens are supported by that router.
+
+### Dashboard says "Bot offline"
+
+The dashboard shows online only if the bot wrote a heartbeat within 3 minutes. Make sure the bot process (`python3 main.py`) is running and both processes share the same MySQL database.
 
 ### State mismatch after restart
 
-The bot stores positions in `state.db`. For production, periodically reconcile:
+The bot stores positions in MySQL (`positions` table). For production, periodically reconcile:
 
 - Binance balances vs bot state
 - EVM wallet token balances vs bot state
@@ -459,16 +485,14 @@ The bot stores positions in `state.db`. For production, periodically reconcile:
 Before using real money:
 
 - [ ] Paper trade for at least 1–4 weeks.
-- [ ] Run Binance testnet first.
+- [ ] Run Binance testnet first (`BINANCE_TESTNET=true`).
 - [ ] Run EVM on a fork/testnet if possible.
 - [ ] Use small capital initially.
-- [ ] Use dedicated API keys and wallet.
-- [ ] Enable IP allowlist on Binance.
-- [ ] Disable withdrawals if possible.
-- [ ] Monitor logs continuously.
-- [ ] Back up `state.db`.
+- [ ] Use dedicated API keys and a dedicated hot wallet.
+- [ ] Enable IP allowlist on Binance; disable withdrawals.
+- [ ] Monitor logs and the dashboard continuously.
+- [ ] Back up the MySQL database regularly (`mysqldump trading_bot > backup.sql`).
 - [ ] Add alerts for errors, failed transactions, and drawdowns.
-- [ ] Test restart behavior after crash.
-- [ ] Verify nonce handling on EVM chain.
-- [ ] Verify gas limits are sufficient for your tokens/DEX.
+- [ ] Test restart behavior after crash (state is in MySQL).
+- [ ] Verify nonce handling and gas limits on the EVM chain.
 - [ ] Add reconciliation between bot state and exchange/wallet balances.

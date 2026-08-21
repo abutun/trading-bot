@@ -88,6 +88,20 @@ class Config:
     evm_slippage_bps: int = 50
     evm_symbols: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
+    # MySQL state database
+    mysql_host: str = "127.0.0.1"
+    mysql_port: int = 3306
+    mysql_user: str = ""
+    mysql_password: str = ""
+    mysql_database: str = "trading_bot"
+
+    # Monitoring dashboard
+    dashboard_username: str = "admin"
+    dashboard_password: str = ""
+    dashboard_secret_key: str = ""
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8080
+
     log_level: str = "INFO"
     log_file: str = ""
 
@@ -169,6 +183,18 @@ class Config:
             evm_gas_price_gwei=float(gas_raw) if gas_raw else None,
             evm_slippage_bps=_int("EVM_SLIPPAGE_BPS", 50),
             evm_symbols=evm_symbols,
+
+            mysql_host=_str("MYSQL_HOST", "127.0.0.1"),
+            mysql_port=_int("MYSQL_PORT", 3306),
+            mysql_user=_str("MYSQL_USER"),
+            mysql_password=_str("MYSQL_PASSWORD"),
+            mysql_database=_str("MYSQL_DATABASE", "trading_bot"),
+
+            dashboard_username=_str("DASHBOARD_USERNAME", "admin"),
+            dashboard_password=_str("DASHBOARD_PASSWORD"),
+            dashboard_secret_key=_str("DASHBOARD_SECRET_KEY"),
+            dashboard_host=_str("DASHBOARD_HOST", "127.0.0.1"),
+            dashboard_port=_int("DASHBOARD_PORT", 8080),
 
             log_level=_str("LOG_LEVEL", "INFO").upper(),
             log_file=_str("LOG_FILE"),

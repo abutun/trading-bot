@@ -15,11 +15,13 @@ from brokers.paper import PaperBroker
 
 logger = logging.getLogger(__name__)
 
+HEARTBEAT_KEY = "bot_heartbeat"
+
 
 class TradingBot:
     def __init__(self, config):
         self.config = config
-        self.state = StateStore("state.db")
+        self.state = StateStore(config)
 
         self.market_data = MarketData(config)
         self.strategy = EMARSI(config)
@@ -116,6 +118,11 @@ class TradingBot:
         equity = self._total_equity(prices)
         self.risk.update(equity)
 
+        try:
+            self.state.record_equity(datetime.now(timezone.utc).isoformat(), equity)
+        except Exception as exc:
+            logger.warning("Failed to record equity: %s", exc)
+
         logger.info("Equity=%.2f halted=%s", equity, self.risk.halted())
 
         if self.risk.halted():
@@ -204,6 +211,13 @@ class TradingBot:
                 self.step()
             except Exception as exc:
                 logger.exception("Bot step failed")
+
+            try:
+                self.state.set_meta(
+                    HEARTBEAT_KEY, datetime.now(timezone.utc).isoformat()
+                )
+            except Exception as exc:
+                logger.warning("Failed to write heartbeat: %s", exc)
 
             elapsed = time.time() - start
             sleep_time = max(1, self.config.loop_seconds - elapsed)

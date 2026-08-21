@@ -1,169 +1,90 @@
-# Trading Bot — Binance + MetaMask/EVM
+# Trading Bot
 
-A production-grade Python trading bot that can trade:
+A production-grade Python trading bot that runs the same strategy across two venues:
 
-- **Binance spot** using API keys.
-- **EVM / MetaMask wallets** by using the wallet private key and executing DEX swaps with `web3.py`.
+- **Binance** (spot, via ccxt)
+- **MetaMask / EVM chains** (via web3.py — the bot signs and sends transactions with your MetaMask private key, so it works on Ethereum mainnet or any EVM chain you configure)
 
-> **Important:** No trading bot can guarantee profit. This project provides a robust execution and risk-management framework plus an example strategy. You should backtest, paper trade, optimize, and monitor before using meaningful capital.
+## Architecture
 
-## Features
-
-- Multi-venue trading:
-  - Binance spot via `ccxt`
-  - EVM/MetaMask DEX swaps via `web3.py`
-- Secrets from environment variables or AWS Secrets Manager.
-- Paper trading and live trading modes.
-- Risk manager:
-  - Max position size
-  - Daily loss limit
-  - Total drawdown kill switch
-  - Stop-loss / take-profit
-- SQLite state persistence:
-  - Positions
-  - Trades
-  - Risk metadata
-- Simple backtester.
-- Docker support.
-
-## Project structure
-
-```text
-trading-bot/
-  requirements.txt
-  .env.example
-  Dockerfile
-  main.py
-  config.py
-  models.py
-  state.py
-  risk.py
-  strategy.py
-  market_data.py
-  backtest.py
-  bot.py
-  brokers/
-    __init__.py
-    base.py
-    paper.py
-    binance_broker.py
-    evm_broker.py
-  README.md
-  SETUP.md
+```
+config.py        All settings, read from environment variables (or AWS Secrets Manager)
+secrets.py       Secret loading: env vars, .env file, or AWS Secrets Manager
+market_data.py   OHLCV data via ccxt (works for both venues' symbols)
+strategy.py      EMA + RSI momentum strategy with trend filter and ATR-based stops
+risk.py          Position sizing, max drawdown kill-switch, daily loss limit
+brokers/         Venue adapters: binance_broker.py (ccxt), evm_broker.py (web3.py / MetaMask key), paper.py
+state.py         MySQL-backed state: positions, trades, equity history (auto-created tables)
+bot.py           Main loop: fetch data -> signal -> risk check -> execute -> manage exits
+dashboard/       Flask monitoring dashboard (login-protected)
+main.py          CLI entry point: `python main.py` (bot) or `python main.py --backtest`
+dashboard.py     Dashboard entry point: `python dashboard.py`
 ```
 
-## Quick start
+## Strategy (EMA crossover + RSI filter)
 
-```bash
-cd /Users/ahmet/Documents/Workspaces/Buhane/trading-bot
+- **Long entry**: fast EMA above slow EMA (uptrend) and RSI below 70 (not overbought).
+- **Exit**: fast EMA below slow EMA and RSI above 30, or the ATR-based stop loss / take profit is hit.
+- **Position sizing**: fixed fraction of equity per trade, capped by `MAX_POSITION_PCT`.
+- **Risk management**: max drawdown kill-switch (closes all, halts trading), daily loss limit.
 
-python3 -m venv .venv
-source .venv/bin/activate
+All parameters (`EMA_FAST`, `EMA_SLOW`, `RSI_PERIOD`, ATR multipliers, risk limits) are configurable via environment variables.
 
-pip install --upgrade pip
-pip install -r requirements.txt
+## Secrets & configuration
 
-cp .env.example .env
-nano .env
-
-python3 main.py --backtest
-python3 main.py
-```
-
-## Configuration summary
-
-The bot is configured through environment variables or `.env`.
-
-Key variables:
+All secrets are read from **environment variables** (or a `.env` file for local dev, or AWS Secrets Manager in production). See `.env.example` for the full list.
 
 | Variable | Description |
 |---|---|
-| `BOT_MODE` | `paper` or `live` |
-| `TRADING_PAIRS` | Comma-separated venue:symbol pairs, e.g. `binance:BTC/USDT,evm:ETH/USDT` |
-| `MARKET_DATA_EXCHANGE` | ccxt exchange id used for market data, e.g. `binance` |
-| `INTERVAL` | Candle interval, e.g. `15m`, `1h`, `4h` |
-| `LOOP_SECONDS` | Seconds between bot loops |
-| `BINANCE_API_KEY` | Binance API key |
-| `BINANCE_API_SECRET` | Binance API secret |
-| `BINANCE_TESTNET` | Use Binance testnet when true |
-| `EVM_PRIVATE_KEY` | Private key for the EVM/MetaMask wallet |
-| `EVM_RPC_URL` | Ethereum-compatible RPC URL |
-| `EVM_CHAIN_ID` | Chain ID, e.g. `1` for Ethereum mainnet, `56` for BSC |
-| `EVM_ROUTER_ADDRESS` | DEX router address, e.g. Uniswap V2 or PancakeSwap |
-| `EVM_SYMBOLS` | JSON mapping from symbol to ERC20 token addresses |
+| `BINANCE_API_KEY` / `BINANCE_API_SECRET` | Binance API credentials (create with spot trading only, no withdrawals) |
+| `EVM_PRIVATE_KEY` | Your MetaMask wallet private key (0x-prefixed hex) — the bot signs EVM transactions with it |
+| `EVM_RPC_URL` | RPC endpoint (e.g. Infura/Alchemy URL) for the EVM chain |
+| `EVM_CHAIN_ID` | Chain ID (1 = Ethereum mainnet, 10 = Optimism, ...) |
+| `EVM_GAS_PRICE_GWEI` | Optional fixed gas price; if empty the bot uses the node's suggested fee |
+| `EVM_SYMBOLS` | JSON mapping ccxt symbol -> ERC20 token addresses (base/quote) for swaps |
+| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | MySQL state database (tables auto-created) |
+| `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` / `DASHBOARD_SECRET_KEY` | Dashboard login and session signing key |
+| `SECRET_MANAGER=aws` + `SECRET_ID` | Optional: load all secrets from AWS Secrets Manager instead of env vars |
 
-See `SETUP.md` for the full configuration guide.
+### Security notes
 
-## Security notes
+- The MetaMask private key gives full control of that wallet. Use a **dedicated hot wallet** with only the funds you want the bot to trade — never your main MetaMask wallet.
+- For Binance, create an API key with **spot trading enabled and withdrawals disabled**.
+- In production prefer AWS Secrets Manager (`SECRET_MANAGER=aws`) over a `.env` file.
+- The dashboard binds to `127.0.0.1` by default — put it behind a reverse proxy (nginx + TLS) if you need remote access.
 
-- Do not commit `.env`.
-- Use a dedicated Binance API key.
-- Disable withdrawals on the Binance API key if possible.
-- Use IP allowlisting for Binance API keys.
-- For EVM/MetaMask trading, use a dedicated hot wallet.
-- Do not put your main MetaMask wallet private key in the bot unless you fully understand the risk.
-- For larger capital, consider AWS Secrets Manager, GCP Secret Manager, Vault, or an institutional signing solution.
-
-## Running modes
-
-### Backtest
+## Running
 
 ```bash
-python3 main.py --backtest
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Configure secrets
+cp .env.example .env   # then fill in real values
+
+# 3. Create the MySQL database (tables are created automatically)
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS trading_bot; CREATE USER 'tradingbot'@'localhost' IDENTIFIED BY 'change-me'; GRANT ALL ON trading_bot.* TO 'tradingbot'@'localhost';"
+
+# 4. Run the bot
+python main.py
+
+# 5. In another terminal, run the monitoring dashboard
+python dashboard.py    # then open http://127.0.0.1:8080
 ```
 
-### Paper trading
+The dashboard shows live equity, daily PnL, drawdown, open positions (with live prices), recent trades, and an equity chart. It refreshes every 30 seconds.
 
-Set:
+## Backtesting / paper trading
+
+- Set `BOT_MODE=paper` to run the full loop with simulated fills — no real orders are sent anywhere, and no API keys or wallet key are needed.
+- Run a historical backtest of the strategy on recent candles:
 
 ```bash
-BOT_MODE=paper
+python main.py --backtest
 ```
 
-Then run:
+- The strategy parameters in `.env` (`EMA_FAST`, `EMA_SLOW`, `RSI_PERIOD`, etc.) can be tuned; validate changes on paper before going live.
 
-```bash
-python3 main.py
-```
+## Honest expectations
 
-### Live trading
-
-Set:
-
-```bash
-BOT_MODE=live
-```
-
-Then run:
-
-```bash
-python3 main.py
-```
-
-## EVM / MetaMask notes
-
-The bot does not control the MetaMask browser extension. It uses the private key behind your MetaMask wallet directly.
-
-The EVM broker currently assumes:
-
-- ERC20 tokens.
-- A Uniswap V2-style router.
-- Wrapped base assets, e.g. WETH instead of native ETH.
-- Stable quote tokens such as USDC or USDT valued approximately 1:1 in equity calculation.
-
-For BSC, use PancakeSwap router and BSC token addresses.  
-For Polygon, use a Polygon DEX router and Polygon token addresses.
-
-## Profitability notes
-
-The included strategy is an example EMA/RSI strategy with ATR-based stops. It is not guaranteed to be profitable in all markets.
-
-To improve success:
-
-- Backtest with fees and slippage.
-- Use out-of-sample data.
-- Paper trade for several weeks.
-- Optimize strategy parameters carefully.
-- Add better market data features.
-- Reduce fees and slippage.
-- Add monitoring, alerts, and reconciliation.
+This bot is engineered to be robust and low-risk (trend filter, ATR stops, drawdown kill-switch), but **no trading bot can guarantee profits** — returns depend on market conditions, fees and slippage. Start with a small amount in paper mode or testnet, verify behavior over weeks, then scale up.

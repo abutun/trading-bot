@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Trading Bot Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0b1220; color: #e5e7eb; }
+    header { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; background: #111a2e; border-bottom: 1px solid #1f2a44; }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    .status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .dot.online { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+    .dot.offline { background: #ef4444; }
+    main { padding: 20px; max-width: 1200px; margin: 0 auto; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .card { background: #111a2e; border: 1px solid #1f2a44; border-radius: 10px; padding: 14px; }
+    .card .label { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
+    .card .value { font-size: 22px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+    .pos { color: #22c55e; }
+    .neg { color: #ef4444; }
+    section { background: #111a2e; border: 1px solid #1f2a44; border-radius: 10px; padding: 16px; margin-bottom: 20px; }
+    section h2 { font-size: 14px; margin: 0 0 12px; color: #cbd5e1; text-transform: uppercase; letter-spacing: 0.05em; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid #1f2a44; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: #94a3b8; font-weight: 500; }
+    .empty { color: #64748b; font-size: 13px; padding: 8px 0; }
+    canvas { width: 100%; height: 260px; display: block; }
+    a { color: #93c5fd; text-decoration: none; font-size: 13px; }
+    .muted { color: #64748b; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Trading Bot Dashboard</h1>
+    <div class="status">
+      {% if bot_online %}
+        <span class="dot online"></span> Bot online
+      {% else %}
+        <span class="dot offline"></span> Bot offline (no recent heartbeat)
+      {% endif %}
+      <a href="/logout">Sign out</a>
+    </div>
+  </header>
+
+  <main>
+    <div class="cards">
+      <div class="card">
+        <div class="label">Equity</div>
+        <div class="value">{{ "%.2f"|format(current_equity) }}</div>
+      </div>
+      <div class="card">
+        <div class="label">Daily PnL</div>
+        <div class="value {{ "pos" if daily_pnl >= 0 else "neg" }}">{{ "%+.2f"|format(daily_pnl) }} ({{ "%+.2f"|format(daily_pnl_pct) }}%)</div>
+      </div>
+      <div class="card">
+        <div class="label">Peak equity</div>
+        <div class="value">{{ "%.2f"|format(peak_equity) }}</div>
+      </div>
+      <div class="card">
+        <div class="label">Drawdown from peak</div>
+        <div class="value">{{ "%.2f"|format(drawdown_pct) }}%</div>
+      </div>
+      <div class="card">
+        <div class="label">Unrealized PnL</div>
+        <div class="value {{ "pos" if total_unrealized >= 0 else "neg" }}">{{ "%+.2f"|format(total_unrealized) }}</div>
+      </div>
+    </div>
+
+    <section>
+      <h2>Equity history</h2>
+      {% if equity_series %}
+        <canvas id="equityChart" width="1100" height="260"></canvas>
+      {% else %}
+        <div class="empty">No equity data yet. The bot records equity every loop.</div>
+      {% endif %}
+    </section>
+
+    <section>
+      <h2>Open positions</h2>
+      {% if positions %}
+        <table>
+          <thead>
+            <tr>
+              <th>Pair</th><th>Venue</th><th>Qty</th><th>Entry</th><th>Last price</th><th>Unrealized PnL</th><th>Stop loss</th><th>Take profit</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in positions %}
+              <tr>
+                <td>{{ p.symbol }}</td>
+                <td>{{ p.venue }}</td>
+                <td>{{ "%.8f"|format(p.qty) }}</td>
+                <td>{{ "%.4f"|format(p.entry_price) }}</td>
+                <td>{{ "%.4f"|format(p.price) }}</td>
+                <td class="{{ "pos" if p.unrealized_pnl >= 0 else "neg" }}">{{ "%+.4f"|format(p.unrealized_pnl) }}</td>
+                <td>{{ "%.4f"|format(p.stop_loss) if p.stop_loss else "-" }}</td>
+                <td>{{ "%.4f"|format(p.take_profit) if p.take_profit else "-" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="empty">No open positions.</div>
+      {% endif %}
+    </section>
+
+    <section>
+      <h2>Recent trades</h2>
+      {% if trades %}
+        <table>
+          <thead>
+            <tr><th>Time (UTC)</th><th>Pair</th><th>Venue</th><th>Side</th><th>Qty</th><th>Price</th><th>Notional</th><th>Fee</th></tr>
+          </thead>
+          <tbody>
+            {% for t in trades %}
+              <tr>
+                <td>{{ (t.ts or "")[:19].replace("T", " ") }}</td>
+                <td>{{ t.symbol }}</td>
+                <td>{{ t.venue }}</td>
+                <td class="{{ "pos" if t.side == 'buy' else 'neg' }}">{{ t.side }}</td>
+                <td>{{ "%.8f"|format(t.qty) }}</td>
+                <td>{{ "%.4f"|format(t.price) }}</td>
+                <td>{{ "%.2f"|format(t.price * t.qty) }}</td>
+                <td>{{ "%.4f"|format(t.fee or 0) }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="empty">No trades yet.</div>
+      {% endif %}
+    </section>
+
+    <p class="muted">Page refreshes every 30 seconds. Prices for open positions are fetched live from the market data source.</p>
+  </main>
+
+  {% if equity_series %}
+  <script>
+    const data = {{ equity_series | tojson }};
+
+    function drawChart() {
+      const canvas = document.getElementById("equityChart");
+      if (!canvas || data.length < 2) return;
+
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      const pad = 40;
+
+      ctx.clearRect(0, 0, w, h);
+
+      const min = Math.min(...data);
+      const max = Math.max(...data);
+      const range = (max - min) || 1;
+
+      ctx.strokeStyle = "#334155";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = pad + ((h - 2 * pad) * i) / 4;
+        ctx.beginPath();
+        ctx.moveTo(pad, y);
+        ctx.lineTo(w - 10, y);
+        ctx.stroke();
+
+        const value = max - (range * i) / 4;
+        ctx.fillStyle = "#94a3b8";
+        ctx.font = "11px sans-serif";
+        ctx.fillText(value.toFixed(2), 4, y + 4);
+      }
+
+      const up = data[data.length - 1] >= data[0];
+      ctx.strokeStyle = up ? "#22c55e" : "#ef4444";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+
+      data.forEach((v, i) => {
+        const x = pad + ((w - pad - 10) * i) / (data.length - 1);
+        const y = pad + ((h - 2 * pad) * (max - v)) / range;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+
+      ctx.stroke();
+    }
+
+    drawChart();
+  </script>
+  {% endif %}
+
+  <script>
+    setTimeout(function () { window.location.reload(); }, 30000);
+  </script>
+</body>
+</html>
