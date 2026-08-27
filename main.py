@@ -20,7 +20,9 @@ def setup_logging(config: Config) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Binance + EVM/MetaMask trading bot")
+    parser = argparse.ArgumentParser(
+        description="Binance, EVM/MetaMask, and Polymarket trading bot"
+    )
     parser.add_argument(
         "--backtest",
         action="store_true",

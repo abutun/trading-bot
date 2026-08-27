@@ -23,6 +23,7 @@
     <p class="sub">Sign in to view bot status, positions and trades.</p>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
     <form method="post" action="/login">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label for="username">Username</label>
       <input type="text" id="username" name="username" autocomplete="username" required>
       <label for="password">Password</label>

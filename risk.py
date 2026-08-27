@@ -9,21 +9,34 @@ class RiskManager:
     def _meta_bool(self, key: str) -> bool:
         return self.state.get_meta(key, "false").lower() == "true"
 
+    def _meta_float(self, key: str, default: float) -> float:
+        raw = self.state.get_meta(key)
+        if raw is None:
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            # Bad metadata must not silently disable safety controls.
+            self.state.set_meta(key, str(default))
+            return default
+
     def update(self, equity: float) -> None:
         now = datetime.now(timezone.utc)
         day = now.strftime("%Y-%m-%d")
 
-        stored_day = self.state.get_meta("day", day)
+        stored_day = self.state.get_meta("day")
         if stored_day != day:
             self.state.set_meta("day", day)
             self.state.set_meta("daily_start_equity", str(equity))
             self.state.set_meta("halted_daily", "false")
 
-        peak = float(self.state.get_meta("peak_equity", str(equity)))
-        if equity > peak:
+        peak_missing = self.state.get_meta("peak_equity") is None
+        peak = self._meta_float("peak_equity", equity)
+        if peak_missing or equity > peak:
+            peak = equity
             self.state.set_meta("peak_equity", str(equity))
 
-        daily_start = float(self.state.get_meta("daily_start_equity", str(equity)))
+        daily_start = self._meta_float("daily_start_equity", equity)
 
         if not self._meta_bool("halted_daily") and daily_start > 0:
             daily_limit = daily_start * (1 - self.config.max_daily_loss_pct / 100)
@@ -46,6 +59,9 @@ class RiskManager:
             return False
 
         if self.state.get_position(pair_id) is not None:
+            return False
+
+        if self.state.has_unresolved_order(pair_id):
             return False
 
         open_positions = len(self.state.get_all_positions())

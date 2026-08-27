@@ -5,8 +5,11 @@ python-dotenv>=1.0.0
 pandas>=2.0.0
 numpy>=1.24.0
 
-# State database (MySQL)
-pymysql>=1.1.0
+# State database (PostgreSQL)
+psycopg[binary]>=3.2.0,<4
+
+# Polymarket CLOB / market-data SDK
+polymarket-client>=0.7.0,<0.8
 
 # Monitoring dashboard
 flask>=3.0.0

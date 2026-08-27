@@ -31,7 +31,13 @@ class PaperBroker(Broker):
 
         return equity
 
-    def buy(self, symbol: str, qty: float, price_hint: float) -> ExecutionResult:
+    def buy(
+        self,
+        symbol: str,
+        qty: float,
+        price_hint: float,
+        client_order_id: str | None = None,
+    ) -> ExecutionResult:
         if qty <= 0 or price_hint <= 0:
             return ExecutionResult(qty=0, price=price_hint)
 
@@ -52,7 +58,13 @@ class PaperBroker(Broker):
         fee = qty * fill_price * self.config.fee_rate
         return ExecutionResult(qty=qty, price=fill_price, fee=fee)
 
-    def sell(self, symbol: str, qty: float, price_hint: float) -> ExecutionResult:
+    def sell(
+        self,
+        symbol: str,
+        qty: float,
+        price_hint: float,
+        client_order_id: str | None = None,
+    ) -> ExecutionResult:
         if qty <= 0 or price_hint <= 0:
             return ExecutionResult(qty=0, price=price_hint)
 

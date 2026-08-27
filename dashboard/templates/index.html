@@ -31,6 +31,7 @@
     canvas { width: 100%; height: 260px; display: block; }
     a { color: #93c5fd; text-decoration: none; font-size: 13px; }
     .muted { color: #64748b; font-size: 12px; }
+    .sign-out { border: 0; background: transparent; color: #93c5fd; font-size: 13px; padding: 0; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -42,7 +43,10 @@
       {% else %}
         <span class="dot offline"></span> Bot offline (no recent heartbeat)
       {% endif %}
-      <a href="/logout">Sign out</a>
+      <form method="post" action="{{ url_for('logout') }}" style="display: inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="sign-out">Sign out</button>
+      </form>
     </div>
   </header>
 
@@ -78,6 +82,28 @@
         <div class="empty">No equity data yet. The bot records equity every loop.</div>
       {% endif %}
     </section>
+
+    {% if unresolved_orders %}
+    <section>
+      <h2>Action required: unresolved orders</h2>
+      <div class="empty">Automatic trading is blocked for these pairs to prevent duplicate venue orders. Reconcile each order with the venue before clearing it from the database.</div>
+      <table>
+        <thead><tr><th>Created (UTC)</th><th>Pair</th><th>Side</th><th>Status</th><th>Broker order</th><th>Error</th></tr></thead>
+        <tbody>
+          {% for o in unresolved_orders %}
+          <tr>
+            <td>{{ (o.created_at|string)[:19].replace("T", " ") }}</td>
+            <td>{{ o.pair_id }}</td>
+            <td>{{ o.side }}</td>
+            <td class="neg">{{ o.status }}</td>
+            <td>{{ o.broker_order_id or "-" }}</td>
+            <td>{{ o.error or "-" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+    {% endif %}
 
     <section>
       <h2>Open positions</h2>

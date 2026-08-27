@@ -146,7 +146,6 @@ class EVMBroker(Broker):
     def _send_transaction(self, tx: dict) -> str:
         tx["from"] = self.wallet
         tx["nonce"] = self._nonce
-        self._nonce += 1
 
         if "chainId" not in tx:
             tx["chainId"] = self.config.evm_chain_id
@@ -157,8 +156,19 @@ class EVMBroker(Broker):
         signed = self.account.sign_transaction(tx)
         raw = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
 
-        tx_hash = self.w3.eth.send_raw_transaction(raw)
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+        try:
+            tx_hash = self.w3.eth.send_raw_transaction(raw)
+        except Exception:
+            self._nonce = self.w3.eth.get_transaction_count(self.wallet, "pending")
+            raise
+
+        # The node accepted the raw transaction. Advance the local nonce even
+        # if waiting for the receipt times out; retrying may otherwise replace
+        # an already-broadcast transaction.
+        self._nonce += 1
+        receipt = self.w3.eth.wait_for_transaction_receipt(
+            tx_hash, timeout=self.config.evm_receipt_timeout_seconds
+        )
 
         if receipt.status != 1:
             raise Exception(f"Transaction failed: {tx_hash.hex()}")
@@ -175,12 +185,21 @@ class EVMBroker(Broker):
         if allowance >= amount_wei:
             return
 
-        tx = self._token(token_address).functions.approve(
-            spender, 2**256 - 1
-        ).build_transaction({"from": self.wallet})
+        # Some ERC-20s (notably USDT variants) reject changing a non-zero
+        # allowance directly to another non-zero value.
+        if allowance > 0:
+            reset_tx = self._token(token_address).functions.approve(
+                spender, 0
+            ).build_transaction({"from": self.wallet})
+            reset_tx["gas"] = int(reset_tx.get("gas", 60_000) * 1.3)
+            self._send_transaction(reset_tx)
 
-        tx["gas"] = int(tx.get("gas", 60_000) * 1.3)
-        self._send_transaction(tx)
+        approval_amount = 2**256 - 1 if self.config.evm_approve_max else amount_wei
+        approval_tx = self._token(token_address).functions.approve(
+            spender, approval_amount
+        ).build_transaction({"from": self.wallet})
+        approval_tx["gas"] = int(approval_tx.get("gas", 60_000) * 1.3)
+        self._send_transaction(approval_tx)
 
     def _get_amount_out(self, amount_in_wei: int, token_in: str, token_out: str) -> int:
         amounts = self.router.functions.getAmountsOut(
@@ -213,12 +232,18 @@ class EVMBroker(Broker):
 
         # Add tracked base token positions.
         for pos in self.state.get_positions_by_venue("evm"):
-            price = prices.get(pos.symbol, pos.entry_price)
+            price = prices.get(pos.pair_id, pos.entry_price)
             equity += pos.qty * price
 
         return equity
 
-    def buy(self, symbol: str, qty: float, price_hint: float) -> ExecutionResult:
+    def buy(
+        self,
+        symbol: str,
+        qty: float,
+        price_hint: float,
+        client_order_id: str | None = None,
+    ) -> ExecutionResult:
         mapping = self._mapping(symbol)
         base = mapping["base"]
         quote = mapping["quote"]
@@ -235,7 +260,10 @@ class EVMBroker(Broker):
         if quote_in <= 0:
             return ExecutionResult(qty=0, price=price_hint)
 
-        if self._balance_wei(quote) < quote_in:
+        quote_before = self._balance_wei(quote)
+        base_before = self._balance_wei(base)
+
+        if quote_before < quote_in:
             raise ValueError("Insufficient quote token balance")
 
         expected_out = self._get_amount_out(quote_in, quote, base)
@@ -262,20 +290,27 @@ class EVMBroker(Broker):
         tx["gas"] = int(tx.get("gas", 250_000) * 1.3)
         tx_hash = self._send_transaction(tx)
 
-        actual_qty = expected_out / (10**base_decimals)
-        quote_spent = quote_in / (10**quote_decimals)
+        actual_qty = (self._balance_wei(base) - base_before) / (10**base_decimals)
+        quote_spent = (quote_before - self._balance_wei(quote)) / (10**quote_decimals)
+
+        if actual_qty <= 0:
+            raise RuntimeError("Swap confirmed but no base-token balance increase was observed")
 
         actual_price = quote_spent / actual_qty if actual_qty > 0 else price_hint
-        fee = max(0.0, abs(qty * price_hint - actual_qty * actual_price))
-
         return ExecutionResult(
             qty=actual_qty,
             price=actual_price,
-            fee=fee,
+            fee=0.0,
             order_id=tx_hash,
         )
 
-    def sell(self, symbol: str, qty: float, price_hint: float) -> ExecutionResult:
+    def sell(
+        self,
+        symbol: str,
+        qty: float,
+        price_hint: float,
+        client_order_id: str | None = None,
+    ) -> ExecutionResult:
         mapping = self._mapping(symbol)
         base = mapping["base"]
         quote = mapping["quote"]
@@ -287,7 +322,10 @@ class EVMBroker(Broker):
             return ExecutionResult(qty=0, price=price_hint)
 
         base_in = int(qty * (10**base_decimals))
-        if self._balance_wei(base) < base_in:
+        base_before = self._balance_wei(base)
+        quote_before = self._balance_wei(quote)
+
+        if base_before < base_in:
             raise ValueError("Insufficient base token balance")
 
         expected_out = self._get_amount_out(base_in, base, quote)
@@ -315,13 +353,16 @@ class EVMBroker(Broker):
         tx["gas"] = int(tx.get("gas", 250_000) * 1.3)
         tx_hash = self._send_transaction(tx)
 
-        actual_quote = expected_out / (10**quote_decimals)
-        actual_price = actual_quote / qty if qty > 0 else price_hint
-        fee = max(0.0, abs(qty * price_hint - actual_quote))
+        actual_base_sold = (base_before - self._balance_wei(base)) / (10**base_decimals)
+        actual_quote = (self._balance_wei(quote) - quote_before) / (10**quote_decimals)
+        if actual_base_sold <= 0:
+            raise RuntimeError("Swap confirmed but no base-token balance decrease was observed")
+
+        actual_price = actual_quote / actual_base_sold
 
         return ExecutionResult(
-            qty=qty,
+            qty=actual_base_sold,
             price=actual_price,
-            fee=fee,
+            fee=0.0,
             order_id=tx_hash,
         )

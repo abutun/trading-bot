@@ -11,9 +11,21 @@ class Broker(ABC):
         pass
 
     @abstractmethod
-    def buy(self, symbol: str, qty: float, price_hint: float):
+    def buy(
+        self,
+        symbol: str,
+        qty: float,
+        price_hint: float,
+        client_order_id: str | None = None,
+    ):
         pass
 
     @abstractmethod
-    def sell(self, symbol: str, qty: float, price_hint: float):
+    def sell(
+        self,
+        symbol: str,
+        qty: float,
+        price_hint: float,
+        client_order_id: str | None = None,
+    ):
         pass
