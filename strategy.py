@@ -1,6 +1,13 @@
+import math
+
+import numpy as np
 import pandas as pd
 
 from models import Signal
+
+
+class StrategyInputError(ValueError):
+    """The strategy was asked to evaluate invalid market data."""
 
 
 class EMARSI:
@@ -8,7 +15,7 @@ class EMARSI:
         self.config = config
 
     def _compute(self, df: pd.DataFrame) -> pd.DataFrame:
-        out = df.copy()
+        out = self._validated_frame(df)
 
         close = out["close"]
         high = out["high"]
@@ -77,11 +84,55 @@ class EMARSI:
         if df is None or len(df) == 0:
             return Signal(0, 0.0, 0.0)
 
+        warmup = max(self.config.ema_slow, self.config.rsi_period, self.config.atr_period) + 1
+        if len(df) <= warmup:
+            return Signal(0, 0.0, 0.0)
+
         out = self._compute(df)
         last = out.iloc[-1]
 
+        action = int(last["action"])
+        stop_loss = float(last["stop_loss"])
+        take_profit = float(last["take_profit"])
+        last_price = float(last["close"])
+        # A flat/invalid ATR does not provide a meaningful protected entry.
+        # Treat it as no signal instead of opening a position with a stop at
+        # the entry price.
+        if action == 1 and (
+            not math.isfinite(stop_loss)
+            or not math.isfinite(take_profit)
+            or stop_loss <= 0
+            or stop_loss >= last_price
+            or take_profit <= last_price
+        ):
+            action = 0
+
         return Signal(
-            action=int(last["action"]),
-            stop_loss=float(last["stop_loss"]),
-            take_profit=float(last["take_profit"]),
+            action=action,
+            stop_loss=stop_loss if math.isfinite(stop_loss) else 0.0,
+            take_profit=take_profit if math.isfinite(take_profit) else 0.0,
         )
+
+    @staticmethod
+    def _validated_frame(df: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(df, pd.DataFrame):
+            raise StrategyInputError("Strategy input must be a pandas DataFrame")
+        required = ("close", "high", "low")
+        missing = [column for column in required if column not in df.columns]
+        if missing:
+            raise StrategyInputError(
+                f"Strategy input is missing columns: {', '.join(missing)}"
+            )
+        out = df.copy()
+        for column in required:
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+        values = out.loc[:, list(required)].to_numpy(dtype=float)
+        if not np.isfinite(values).all() or (values <= 0).any():
+            raise StrategyInputError("Strategy input contains non-finite or non-positive prices")
+        if (out["high"] < out["low"]).any() or (
+            out["high"] < out[["close", "low"]].max(axis=1)
+        ).any() or (
+            out["low"] > out[["close", "high"]].min(axis=1)
+        ).any():
+            raise StrategyInputError("Strategy input contains inconsistent high/low bounds")
+        return out

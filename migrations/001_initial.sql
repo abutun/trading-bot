@@ -56,5 +56,6 @@ CREATE TABLE IF NOT EXISTS orders (
     updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_orders_pair_created ON orders (pair_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_broker_order_id ON orders (broker_order_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_one_unresolved_per_pair
 ON orders (pair_id) WHERE status IN ('pending', 'unknown');

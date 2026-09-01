@@ -1,0 +1,76 @@
+# Never send local credentials or private keys to the image build context.
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.kdbx
+*.age
+*.enc
+secrets/
+
+# Hot-wallet exports and browser-wallet state are credentials too. Keep all
+# keystore directories and common MetaMask/geth export naming patterns out of
+# the image build context.
+keystore/
+keystores/
+wallets/
+metamask/
+MetaMask/
+geth/
+UTC--*
+*.keystore
+*.keystore.json
+*.wallet
+*.wallet.json
+*keystore*.json
+*wallet*.json
+
+# Keep operational database exports out of the image while retaining reviewed
+# SQL migrations under migrations/.
+/backups/
+/backup/
+/dumps/
+/postgres_data/
+/pgdata/
+/*.sql
+/*.sql.gz
+/*.dump
+/*.dump.gz
+/*.backup
+/*.bak
+/*.bkp
+
+# Source-control, CI, and generated development artifacts are not needed in
+# the production runtime image.
+.git/
+.github/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+graphify-out/
+tests/
+requirements-dev.txt
+requirements-dev.lock
+requirements-migration.txt
+requirements-migration.lock
+uv.lock
+pytest.ini
+*.db
+*.sqlite*
+*.log
+.DS_Store
+README.md
+SETUP.md
+SAAS_PLAN.md

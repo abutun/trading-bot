@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import json
+import math
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Mapping, Optional
 from uuid import uuid4
 
 import psycopg
@@ -19,6 +21,14 @@ class UnresolvedOrderError(RuntimeError):
     """Raised when a pair has an order whose external outcome is not known."""
 
 
+class StateConflictError(RuntimeError):
+    """Raised when durable state changed after an external order was submitted."""
+
+
+class BotInstanceLockError(RuntimeError):
+    """Raised when another process already owns this database's trading lock."""
+
+
 class StateStore:
     """PostgreSQL-backed durable bot state.
 
@@ -29,7 +39,8 @@ class StateStore:
     reconciles the venue account.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, *, initialize_schema: bool = True):
+        self._bot_lock_name: Optional[str] = None
         if not config.postgres_dsn and (
             not config.postgres_user
             or not config.postgres_password
@@ -39,18 +50,34 @@ class StateStore:
                 "Set POSTGRES_DSN or POSTGRES_USER, POSTGRES_PASSWORD, and POSTGRES_DATABASE"
             )
         if config.postgres_dsn:
-            self._conn = psycopg.connect(config.postgres_dsn, row_factory=dict_row)
+            connect_args = {
+                "row_factory": dict_row,
+                "connect_timeout": config.postgres_connect_timeout_seconds,
+                "application_name": "trading-bot",
+            }
+            # Keep a CA path supplied outside the DSN effective for both
+            # connection styles. sslmode itself remains DSN-owned here, so the
+            # production Config check requires that it be explicit in the DSN.
+            if config.postgres_sslrootcert:
+                connect_args["sslrootcert"] = config.postgres_sslrootcert
+            self._conn = psycopg.connect(config.postgres_dsn, **connect_args)
         else:
-            self._conn = psycopg.connect(
-                host=config.postgres_host,
-                port=config.postgres_port,
-                user=config.postgres_user,
-                password=config.postgres_password,
-                dbname=config.postgres_database,
-                sslmode=config.postgres_sslmode,
-                row_factory=dict_row,
-            )
-        self._init_schema()
+            connect_args = {
+                "host": config.postgres_host,
+                "port": config.postgres_port,
+                "user": config.postgres_user,
+                "password": config.postgres_password,
+                "dbname": config.postgres_database,
+                "sslmode": config.postgres_sslmode,
+                "connect_timeout": config.postgres_connect_timeout_seconds,
+                "application_name": "trading-bot",
+                "row_factory": dict_row,
+            }
+            if config.postgres_sslrootcert:
+                connect_args["sslrootcert"] = config.postgres_sslrootcert
+            self._conn = psycopg.connect(**connect_args)
+        if initialize_schema:
+            self._init_schema()
         logger.info(
             "StateStore connected to PostgreSQL %s:%s/%s",
             config.postgres_host,
@@ -121,6 +148,7 @@ class StateStore:
             )
             """,
             "CREATE INDEX IF NOT EXISTS idx_orders_pair_created ON orders (pair_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_orders_broker_order_id ON orders (broker_order_id)",
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_one_unresolved_per_pair
             ON orders (pair_id) WHERE status IN ('pending', 'unknown')
@@ -152,6 +180,44 @@ class StateStore:
         with self._transaction() as cur:
             cur.execute(sql, params)
             return list(cur.fetchall())
+
+    def ping(self) -> bool:
+        """Return whether this state connection can execute a trivial query."""
+        try:
+            return bool(self._query("SELECT true AS ok")[0]["ok"])
+        except Exception:
+            logger.exception("PostgreSQL health check failed")
+            return False
+
+    def acquire_bot_lock(self, lock_name: str = "trading-bot") -> None:
+        """Acquire a database-scoped leader lock for one trading process.
+
+        Advisory locks are tied to this connection and are released by
+        ``release_bot_lock`` or connection close. This prevents two containers
+        pointed at the same account database from issuing concurrent orders.
+        """
+        if self._bot_lock_name:
+            if self._bot_lock_name != lock_name:
+                raise BotInstanceLockError("This StateStore already owns another bot lock")
+            return
+        rows = self._query(
+            "SELECT pg_try_advisory_lock(hashtext(%s)) AS acquired", (lock_name,)
+        )
+        if not rows or not rows[0]["acquired"]:
+            raise BotInstanceLockError(
+                f"Another bot process already holds the PostgreSQL lock {lock_name!r}"
+            )
+        self._bot_lock_name = lock_name
+
+    def release_bot_lock(self) -> None:
+        if not self._bot_lock_name:
+            return
+        lock_name = self._bot_lock_name
+        self._bot_lock_name = None
+        try:
+            self._query("SELECT pg_advisory_unlock(hashtext(%s))", (lock_name,))
+        except Exception:
+            logger.exception("Failed to release PostgreSQL bot lock %s", lock_name)
 
     @staticmethod
     def _timestamp(value: str | datetime) -> datetime:
@@ -234,8 +300,13 @@ class StateStore:
     ) -> str:
         if side not in {"buy", "sell"}:
             raise ValueError("Order side must be 'buy' or 'sell'")
-        if qty <= 0 or price < 0:
-            raise ValueError("Order quantity must be positive and price cannot be negative")
+        if (
+            not math.isfinite(qty)
+            or not math.isfinite(price)
+            or qty <= 0
+            or price <= 0
+        ):
+            raise ValueError("Order quantity and price must be finite and positive")
 
         if self.has_unresolved_order(pair_id):
             raise UnresolvedOrderError(
@@ -259,12 +330,27 @@ class StateStore:
                 f"{pair_id} has an unresolved order; reconcile it before trading again"
             ) from exc
 
+        logger.info(
+            "order_intent_created client_order_id=%s pair=%s venue=%s side=%s qty=%.12g price=%.12g",
+            client_order_id,
+            pair_id,
+            venue,
+            side,
+            qty,
+            price,
+        )
         return client_order_id
 
     def has_unresolved_order(self, pair_id: str) -> bool:
         rows = self._query(
             "SELECT 1 FROM orders WHERE pair_id = %s AND status IN ('pending', 'unknown') LIMIT 1",
             (pair_id,),
+        )
+        return bool(rows)
+
+    def has_any_unresolved_order(self) -> bool:
+        rows = self._query(
+            "SELECT 1 FROM orders WHERE status IN ('pending', 'unknown') LIMIT 1"
         )
         return bool(rows)
 
@@ -276,6 +362,33 @@ class StateStore:
             """
         )
 
+    def get_order(self, client_order_id: str) -> Optional[Dict[str, Any]]:
+        rows = self._query(
+            "SELECT * FROM orders WHERE client_order_id = %s", (client_order_id,)
+        )
+        return rows[0] if rows else None
+
+    def mark_order_submitted(self, client_order_id: str, broker_order_id: str) -> None:
+        """Persist a known external identifier before durable fill processing.
+
+        If a later position/trade transaction fails, an operator can still find
+        the actual venue order. The status remains pending until the atomic
+        completion method records the resulting position and trade.
+        """
+        if not broker_order_id:
+            return
+        affected = self._execute(
+            """
+            UPDATE orders SET broker_order_id = %s, updated_at = %s
+            WHERE client_order_id = %s AND status = 'pending'
+            """,
+            (broker_order_id[:255], datetime.now(timezone.utc), client_order_id),
+        )
+        if affected != 1:
+            raise UnresolvedOrderError(
+                f"Order {client_order_id} is not pending and cannot be marked submitted"
+            )
+
     def mark_order_rejected(self, client_order_id: str, error: str) -> None:
         self._execute(
             """
@@ -284,6 +397,7 @@ class StateStore:
             """,
             (error[:4000], datetime.now(timezone.utc), client_order_id),
         )
+        logger.warning("order_rejected client_order_id=%s reason=%s", client_order_id, error[:500])
 
     def mark_order_unknown(self, client_order_id: str, error: str) -> None:
         self._execute(
@@ -293,12 +407,13 @@ class StateStore:
             """,
             (error[:4000], datetime.now(timezone.utc), client_order_id),
         )
+        logger.error("order_unknown client_order_id=%s reason=%s", client_order_id, error[:500])
 
     def complete_entry(
         self, client_order_id: str, pos: Position, result: ExecutionResult, ts: str
     ) -> None:
-        if result.qty <= 0:
-            raise ValueError("Cannot complete an entry with a zero fill")
+        _validate_execution_result(result)
+        _validate_new_position(pos)
 
         with self._transaction() as cur:
             cur.execute(
@@ -327,14 +442,7 @@ class StateStore:
                 INSERT INTO positions (
                     pair_id, venue, symbol, qty, entry_price, stop_loss, take_profit, opened_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (pair_id) DO UPDATE SET
-                    venue = EXCLUDED.venue,
-                    symbol = EXCLUDED.symbol,
-                    qty = EXCLUDED.qty,
-                    entry_price = EXCLUDED.entry_price,
-                    stop_loss = EXCLUDED.stop_loss,
-                    take_profit = EXCLUDED.take_profit,
-                    opened_at = EXCLUDED.opened_at
+                ON CONFLICT (pair_id) DO NOTHING
                 """,
                 (
                     pos.pair_id,
@@ -347,21 +455,39 @@ class StateStore:
                     self._timestamp(pos.opened_at),
                 ),
             )
+            if cur.rowcount != 1:
+                raise StateConflictError(
+                    f"Cannot complete entry {client_order_id}: {pos.pair_id} already has a position"
+                )
             self._insert_trade(cur, ts, pos, "buy", result)
 
     def complete_exit(
         self, client_order_id: str, pos: Position, result: ExecutionResult, ts: str
     ) -> float:
-        if result.qty <= 0:
-            raise ValueError("Cannot complete an exit with a zero fill")
+        _validate_execution_result(result)
         if result.qty > pos.qty * 1.000001:
             raise ValueError("Venue reported an exit fill larger than the tracked position")
 
-        remaining_qty = max(0.0, pos.qty - result.qty)
-        if remaining_qty <= max(1e-12, pos.qty * 1e-9):
-            remaining_qty = 0.0
-
         with self._transaction() as cur:
+            cur.execute(
+                "SELECT qty FROM positions WHERE pair_id = %s FOR UPDATE", (pos.pair_id,)
+            )
+            current = cur.fetchone()
+            if current is None:
+                raise StateConflictError(
+                    f"Cannot complete exit {client_order_id}: {pos.pair_id} no longer exists"
+                )
+            current_qty = float(current["qty"])
+            if not math.isclose(current_qty, pos.qty, rel_tol=1e-9, abs_tol=1e-12):
+                raise StateConflictError(
+                    f"Cannot complete exit {client_order_id}: {pos.pair_id} changed concurrently"
+                )
+            if result.qty > current_qty * 1.000001:
+                raise ValueError("Venue reported an exit fill larger than the current position")
+
+            remaining_qty = max(0.0, current_qty - result.qty)
+            if remaining_qty <= max(1e-12, current_qty * 1e-9):
+                remaining_qty = 0.0
             cur.execute(
                 """
                 UPDATE orders
@@ -385,11 +511,20 @@ class StateStore:
 
             if remaining_qty:
                 cur.execute(
-                    "UPDATE positions SET qty = %s WHERE pair_id = %s",
-                    (remaining_qty, pos.pair_id),
+                    "UPDATE positions SET qty = %s WHERE pair_id = %s AND qty = %s",
+                    (remaining_qty, pos.pair_id, current["qty"]),
                 )
+                if cur.rowcount != 1:
+                    raise StateConflictError(
+                        f"Cannot update residual quantity for {pos.pair_id}"
+                    )
             else:
-                cur.execute("DELETE FROM positions WHERE pair_id = %s", (pos.pair_id,))
+                cur.execute(
+                    "DELETE FROM positions WHERE pair_id = %s AND qty = %s",
+                    (pos.pair_id, current["qty"]),
+                )
+                if cur.rowcount != 1:
+                    raise StateConflictError(f"Cannot delete closed position {pos.pair_id}")
 
             self._insert_trade(cur, ts, pos, "sell", result)
 
@@ -460,16 +595,88 @@ class StateStore:
         return rows[0]["value"] if rows and rows[0]["value"] is not None else default
 
     def set_meta(self, key: str, value: str) -> None:
-        self._execute(
-            """
-            INSERT INTO meta ("key", value) VALUES (%s, %s)
-            ON CONFLICT ("key") DO UPDATE SET value = EXCLUDED.value
-            """,
-            (key, value),
-        )
+        self.set_meta_many({key: value})
+
+    def set_meta_many(self, entries: Mapping[str, str]) -> None:
+        """Atomically persist a related set of metadata values.
+
+        Risk baselines and halt flags are safety state, not best-effort
+        telemetry.  A process crash between their writes must never create a
+        partially reset loss limit.
+        """
+        if not entries:
+            return
+        normalized = {str(key): str(value) for key, value in entries.items()}
+        if any(not key or len(key) > 128 for key in normalized):
+            raise ValueError("Metadata key must be non-empty and at most 128 characters")
+        with self._transaction() as cur:
+            for key, value in normalized.items():
+                cur.execute(
+                    """
+                    INSERT INTO meta ("key", value) VALUES (%s, %s)
+                    ON CONFLICT ("key") DO UPDATE SET value = EXCLUDED.value
+                    """,
+                    (key, value),
+                )
+
+    def set_latest_price(
+        self, pair_id: str, price: float, ts: str | datetime, source: str
+    ) -> None:
+        """Persist the last validated market price for dashboard/readiness use."""
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("Latest price must be finite and positive")
+        payload = {
+            "price": price,
+            "ts": self._timestamp(ts).isoformat(),
+            "source": source,
+        }
+        self.set_meta(f"last_price:{pair_id}", json.dumps(payload, separators=(",", ":")))
+
+    def get_latest_price(self, pair_id: str) -> Optional[Dict[str, Any]]:
+        raw = self.get_meta(f"last_price:{pair_id}")
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+            price = float(payload["price"])
+            timestamp = self._timestamp(payload["ts"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not math.isfinite(price) or price <= 0:
+            return None
+        return {"price": price, "ts": timestamp, "source": str(payload.get("source", ""))}
 
     def close(self) -> None:
         try:
+            self.release_bot_lock()
             self._conn.close()
         except Exception:  # pragma: no cover - best effort on shutdown
             pass
+
+
+def _validate_execution_result(result: ExecutionResult) -> None:
+    """Reject malformed broker responses before mutating durable state."""
+    if (
+        not math.isfinite(result.qty)
+        or not math.isfinite(result.price)
+        or not math.isfinite(result.fee)
+        or result.qty <= 0
+        or result.price <= 0
+        or result.fee < 0
+    ):
+        raise ValueError("Broker result has non-finite or invalid fill values")
+
+
+def _validate_new_position(pos: Position) -> None:
+    """Ensure an externally filled entry cannot create an unprotected long."""
+    values = (pos.qty, pos.entry_price, pos.stop_loss, pos.take_profit)
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError("Position contains non-finite values")
+    if (
+        pos.qty <= 0
+        or pos.entry_price <= 0
+        or pos.stop_loss <= 0
+        or pos.stop_loss >= pos.entry_price
+        or pos.take_profit <= pos.entry_price
+    ):
+        raise ValueError("New position must have a positive protected long stop and target")

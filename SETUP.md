@@ -1,197 +1,144 @@
-# Setup and operations guide
+# Local setup and migration
 
-## Prerequisites
+This guide is for development, paper trading, and migration rehearsal. Use
+[PRODUCTION.md](PRODUCTION.md) for a server that can send real orders.
 
-- Python 3.10+ (3.11 recommended)
-- PostgreSQL 14+ (16 recommended)
-- A venue account only when using live mode
+## Requirements
 
-For macOS:
+- Python 3.11 (the CI/container runtime version)
+- Docker Compose or PostgreSQL 16+
+- No exchange, wallet, or Polymarket account is needed for paper mode
 
-```bash
-brew install postgresql@16
-brew services start postgresql@16
-```
-
-Or use the included Compose service:
-
-```bash
-cp .env.example .env
-# Set POSTGRES_PASSWORD in .env before starting the service.
-docker compose up -d postgres
-```
-
-## Install the application
+## Install
 
 ```bash
 cd /Users/ahmet/Documents/Workspaces/Buhane/trading-bot
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -r requirements.txt
-cp .env.example .env
+python -m pip install --require-hashes -r requirements-dev.lock
 ```
 
-Generate a dashboard signing secret and put it in `.env`:
+## Local PostgreSQL and isolated environments
+
+The Compose file intentionally does not share the bot’s venue credentials with
+the dashboard:
+
+```bash
+cp .env.example .env
+cp .env.bot.example .env.bot
+cp .env.dashboard.example .env.dashboard
+```
+
+Set one long `POSTGRES_PASSWORD` in all three files. For local Compose,
+`.env.dashboard` may use `POSTGRES_USER=tradingbot`; production should use the
+read-only dashboard role from [PRODUCTION.md](PRODUCTION.md).
+
+```bash
+docker compose up -d postgres
+docker compose run --rm bot python main.py --preflight
+docker compose up -d bot dashboard
+```
+
+This is the local-development stack and deliberately starts its local
+PostgreSQL service. Do not use it unchanged on a server: the external TLS
+database overlay and CA-certificate mount are documented in
+[PRODUCTION.md](PRODUCTION.md).
+
+Open `http://127.0.0.1:8080` only from the local machine. The dashboard needs
+its own non-empty `DASHBOARD_PASSWORD` and random `DASHBOARD_SECRET_KEY`:
 
 ```bash
 openssl rand -hex 32
 ```
 
-At minimum, set:
+To run directly instead of Compose, copy `.env.example` to `.env`, create the
+PostgreSQL role/database, and use `POSTGRES_HOST=127.0.0.1`.
 
-```dotenv
-BOT_MODE=paper
-TRADING_PAIRS=binance:BTC/USDT
-POSTGRES_HOST=127.0.0.1
-POSTGRES_PORT=5432
-POSTGRES_USER=tradingbot
-POSTGRES_PASSWORD=<long-random-password>
-POSTGRES_DATABASE=trading_bot
-DASHBOARD_USERNAME=admin
-DASHBOARD_PASSWORD=<long-random-password>
-DASHBOARD_SECRET_KEY=<openssl-output>
-```
-
-`state.py` creates all application tables automatically. The initial schema is
-checked into [`migrations/001_initial.sql`](migrations/001_initial.sql) for
-review and managed deployments.
-
-## Safe first run
-
-Start only in paper mode:
+## Safe commands
 
 ```bash
-BOT_MODE=paper python main.py
+python main.py --backtest     # historical strategy sanity check
+python main.py --preflight    # no order; DB/data/equity validation
+python main.py --once         # one guarded paper/live cycle
+python main.py                # persistent loop
+python dashboard.py           # development dashboard only
 ```
 
-In a second terminal, with the same `.env`:
+The default `BOT_MODE=paper` is intentional. `BOT_MODE=live` also needs the
+exact `LIVE_TRADING_CONFIRMATION=I_UNDERSTAND_LIVE_TRADING_RISK` value.
 
-```bash
-python dashboard.py
-```
-
-Open `http://127.0.0.1:8080`. The dashboard login has CSRF protection,
-HttpOnly/Lax session cookies, and no insecure fallback secret. For remote
-access, place it behind a TLS reverse proxy. Do not expose Flask’s development
-server directly to the Internet.
-
-## Venue setup
+## Venue examples
 
 ### Binance
 
 ```dotenv
-BOT_MODE=live
 TRADING_PAIRS=binance:BTC/USDT
-BINANCE_API_KEY=...
-BINANCE_API_SECRET=...
 BINANCE_TESTNET=true
+BINANCE_ORDER_MODE=ioc_limit
 ```
 
-Use dedicated testnet keys first. Mainnet keys should be Spot-only,
-withdrawal-disabled, and IP-allowlisted where possible. Switch to
-`BINANCE_TESTNET=false` only after paper/testnet verification.
+Add API credentials only for live/testnet venue testing. The broker uses IOC
+limit orders and reports non-terminal results as unresolved, not as a retry.
 
-### EVM / MetaMask
+### EVM
 
 ```dotenv
-BOT_MODE=live
 TRADING_PAIRS=evm:ETH/USDT
-EVM_PRIVATE_KEY=0x...
 EVM_RPC_URL=https://your-rpc.example
 EVM_CHAIN_ID=1
-EVM_ROUTER_ADDRESS=0x...
-EVM_SYMBOLS={"ETH/USDT":{"base":"<WETH-address>","quote":"<USDC-address>"}}
-EVM_SLIPPAGE_BPS=50
-EVM_APPROVE_MAX=false
+EVM_ROUTER_ADDRESS=<verified-uniswap-v2-compatible-router>
+EVM_SYMBOLS={"ETH/USDT":{"base":"<WETH>","quote":"<USDC>"}}
 ```
 
-This broker trades ERC-20 paths on a Uniswap V2-compatible router. Use WETH,
-not native ETH. The default exact-amount approval is safer but can require a
-new approval for future swaps. A dedicated hot wallet must hold both swap funds
-and the native gas token.
+Only supply a dedicated exported MetaMask-compatible private key when testing
+live execution. The mapping symbol must be valid for the configured market-data
+exchange and must represent the same assets as the token addresses.
 
-### Polymarket
-
-Polymarket symbols are your local aliases for a YES or NO outcome token:
+### Polymarket V2
 
 ```dotenv
-BOT_MODE=paper
 TRADING_PAIRS=polymarket:example-yes
 POLYMARKET_MARKETS={"example-yes":{"token_id":"<outcome-token-id>"}}
 POLYMARKET_HISTORY_INTERVAL=1d
 POLYMARKET_FIDELITY_MINUTES=15
 ```
 
-For live orders:
-
-```dotenv
-BOT_MODE=live
-TRADING_PAIRS=polymarket:example-yes
-POLYMARKET_PRIVATE_KEY=0x...
-POLYMARKET_WALLET_ADDRESS=0x...
-POLYMARKET_RELAYER_API_KEY=...
-POLYMARKET_RELAYER_API_KEY_ADDRESS=0x...
-POLYMARKET_SLIPPAGE_BPS=100
-POLYMARKET_MARKETS={"example-yes":{"token_id":"<outcome-token-id>"}}
-```
-
-`POLYMARKET_PRIVATE_KEY` is compatible with a MetaMask signer but must be a
-dedicated trading key. Fund the account with pUSD and configure Polymarket
-trading approvals before enabling live mode. The broker uses the official
-`polymarket-client` SDK and fill-or-kill market orders; no partial strategy
-position is accepted. Consult Polymarket’s official [wallet setup](https://docs.polymarket.com/trading/wallets-auth), [order placement](https://docs.polymarket.com/trading/place-orders), and [price history](https://docs.polymarket.com/market-data/prices-order-books) documentation before funding or trading.
+The client is `py-clob-client-v2`; do not use legacy V1 relayer settings. For
+live mode provide the V2 signer/API credentials and verify the selected token
+through Polymarket’s official [trading documentation](https://docs.polymarket.com/trading/overview).
 
 ## MySQL → PostgreSQL migration
 
-The application no longer connects to MySQL at runtime. The optional migration
-script is the only remaining MySQL consumer.
+The bot never connects to MySQL at runtime. The optional migration tool is a
+one-time copy operation.
 
-1. Stop `main.py` and `dashboard.py`.
-2. Back up the source database, for example:
-
-   ```bash
-   mysqldump --single-transaction -u tradingbot -p trading_bot > trading_bot_backup.sql
-   ```
-
-3. Create `.env.migration` with the legacy `MYSQL_HOST`, `MYSQL_PORT`,
-   `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE` values and target
-   `POSTGRES_*` values.
+1. Stop bot/dashboard and back up MySQL.
+2. Copy `cp .env.migration.example .env.migration` and fill `MYSQL_*` source
+   values plus `POSTGRES_*` target values.
+3. Use an empty PostgreSQL target. The script takes the same database leader
+   lock as the bot and refuses populated state tables.
 4. Run:
 
    ```bash
-   pip install -r requirements-migration.txt
+   python -m pip install --require-hashes -r requirements-migration.lock
    python scripts/migrate_mysql_to_postgres.py --env-file .env.migration
    ```
 
-The target must have no positions. The script copies legacy positions, trades,
-metadata, and equity history into PostgreSQL atomically; it never deletes data
-from MySQL. Verify row counts and the dashboard, then retire MySQL credentials.
+5. The selected `--env-file` replaces ambient environment variables; it is the
+   entire migration configuration. The script refuses any source
+   non-terminal/unknown order and a carried position without finite
+   `0 < stop-loss < entry < take-profit` protection. Reconcile either condition
+   manually before retrying.
+6. Compare source/target counts and dashboard data before retiring MySQL
+   credentials. The script copies positions, trades, metadata, and equity
+   history atomically and does not modify the source database.
 
-## Normal operations
+## Validation
 
 ```bash
-python main.py --backtest
-BOT_MODE=paper python main.py
-python dashboard.py
+python -m pytest
+python -m ruff check .
+python -m pip_audit -r requirements.lock
+python -m compileall -q .
 ```
-
-Before every live deployment:
-
-- Review open positions and external venue balances.
-- Verify the dashboard is connected to the intended PostgreSQL database.
-- Confirm the bot’s first heartbeat appears.
-- Check the `orders` table/dashboard for unresolved `pending` or `unknown`
-  rows. Do not clear an unresolved order until its venue result and resulting
-  position have been reconciled manually.
-- Back up PostgreSQL regularly, e.g. `pg_dump -Fc trading_bot > backup.dump`.
-
-## Troubleshooting
-
-| Symptom | Check |
-|---|---|
-| PostgreSQL connection failure | PostgreSQL is running, `POSTGRES_*` are correct, and the user can connect to the named database. |
-| Polymarket has no data | Alias exists in `POLYMARKET_MARKETS`, token ID is the selected outcome token, and the outcome has price history. |
-| Polymarket order rejected | Account has pUSD, trading approvals are set, wallet/signer pairing is correct, and the market accepts orders. |
-| Bot skips a pair as unresolved | Inspect the venue order/transaction and database `orders` record; this is an intentional duplicate-order safeguard. |
-| Dashboard refuses to start | Set a non-empty `DASHBOARD_PASSWORD` and a cryptographically random `DASHBOARD_SECRET_KEY`. |

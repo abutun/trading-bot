@@ -32,6 +32,11 @@
     a { color: #93c5fd; text-decoration: none; font-size: 13px; }
     .muted { color: #64748b; font-size: 12px; }
     .sign-out { border: 0; background: transparent; color: #93c5fd; font-size: 13px; padding: 0; cursor: pointer; }
+    .price-state { display: inline-block; margin-left: 5px; padding: 2px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 1.2; text-transform: uppercase; letter-spacing: .04em; }
+    .price-state.fresh { color: #86efac; background: #14532d; }
+    .price-state.stale { color: #fde68a; background: #78350f; }
+    .price-state.unavailable { color: #fecaca; background: #7f1d1d; margin-left: 0; }
+    .price-meta { color: #64748b; font-size: 10px; margin-top: 3px; white-space: normal; }
   </style>
 </head>
 <body>
@@ -69,8 +74,12 @@
         <div class="value">{{ "%.2f"|format(drawdown_pct) }}%</div>
       </div>
       <div class="card">
-        <div class="label">Unrealized PnL</div>
-        <div class="value {{ "pos" if total_unrealized >= 0 else "neg" }}">{{ "%+.2f"|format(total_unrealized) }}</div>
+        <div class="label">Unrealized PnL{% if total_unrealized_status != "fresh" %} · {{ total_unrealized_status }}{% endif %}</div>
+        {% if total_unrealized is none %}
+          <div class="value"><span class="price-state unavailable">Unavailable</span></div>
+        {% else %}
+          <div class="value {{ "pos" if total_unrealized >= 0 else "neg" }}">{{ "%+.2f"|format(total_unrealized) }}</div>
+        {% endif %}
       </div>
     </div>
 
@@ -121,8 +130,25 @@
                 <td>{{ p.venue }}</td>
                 <td>{{ "%.8f"|format(p.qty) }}</td>
                 <td>{{ "%.4f"|format(p.entry_price) }}</td>
-                <td>{{ "%.4f"|format(p.price) }}</td>
-                <td class="{{ "pos" if p.unrealized_pnl >= 0 else "neg" }}">{{ "%+.4f"|format(p.unrealized_pnl) }}</td>
+                <td>
+                  {% if p.price is none %}
+                    <span class="price-state unavailable" title="{{ p.price_message }}">Unavailable</span>
+                  {% else %}
+                    {{ "%.4f"|format(p.price) }}
+                    <span class="price-state {{ p.price_status }}" title="{{ p.price_message }}">{{ p.price_status }}</span>
+                    <div class="price-meta">
+                      {% if p.price_timestamp %}{{ (p.price_timestamp|string)[:19].replace("T", " ") }} UTC{% endif %}
+                      {% if p.price_source %} · {{ p.price_source }}{% endif %}
+                    </div>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if p.unrealized_pnl is none %}
+                    <span class="price-state unavailable">Unavailable</span>
+                  {% else %}
+                    <span class="{{ "pos" if p.unrealized_pnl >= 0 else "neg" }}">{{ "%+.4f"|format(p.unrealized_pnl) }}</span>
+                  {% endif %}
+                </td>
                 <td>{{ "%.4f"|format(p.stop_loss) if p.stop_loss else "-" }}</td>
                 <td>{{ "%.4f"|format(p.take_profit) if p.take_profit else "-" }}</td>
               </tr>
@@ -161,7 +187,7 @@
       {% endif %}
     </section>
 
-    <p class="muted">Page refreshes every 30 seconds. Prices for open positions are fetched live from the market data source.</p>
+    <p class="muted">Page refreshes every 30 seconds. Open-position prices are read only from the bot’s persisted market prices; no venue request is made from this dashboard. A price older than {{ price_stale_seconds }} seconds is marked stale.</p>
   </main>
 
   {% if equity_series %}

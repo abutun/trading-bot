@@ -16,6 +16,9 @@ class FakeState:
     def set_meta(self, key, value):
         self.meta[key] = value
 
+    def set_meta_many(self, values):
+        self.meta.update(values)
+
     def get_position(self, pair_id):
         return self.positions.get(pair_id)
 
@@ -56,3 +59,30 @@ class RiskManagerTests(unittest.TestCase):
         self.assertEqual(state.get_meta("peak_equity"), "1000")
         manager.update(900)
         self.assertTrue(manager.total_halted())
+
+    def test_malformed_safety_metadata_halts_instead_of_reenabling_orders(self):
+        config = Config()
+        state = FakeState()
+        state.meta["halted_safety"] = "definitely-not-a-boolean"
+        manager = RiskManager(config, state)
+
+        self.assertTrue(manager.halted())
+        self.assertEqual(state.meta["halted_safety"], "true")
+        self.assertIn("invalid_risk_metadata", state.meta["halt_reason"])
+
+    def test_safety_halt_prevents_loss_limit_liquidation(self):
+        config = Config()
+        state = FakeState()
+        state.meta.update({"halted_safety": "true", "halted_daily": "true"})
+        manager = RiskManager(config, state)
+
+        self.assertFalse(manager.liquidation_required())
+
+    def test_position_size_reserves_global_buy_slippage(self):
+        config = Config(max_order_notional=100, max_order_slippage_bps=100)
+        state = FakeState()
+        manager = RiskManager(config, state)
+
+        quantity = manager.position_size(1_000, 100)
+        self.assertAlmostEqual(quantity, 100 / 101)
+        self.assertLessEqual(quantity * 101, 100)

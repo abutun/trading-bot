@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python 3.11 quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements.lock
+            requirements-dev.txt
+            requirements-dev.lock
+            requirements-migration.txt
+            requirements-migration.lock
+
+      - name: Verify dependency locks
+        run: |
+          python -m pip install --upgrade "pip<26"
+          python -m pip install "uv==0.9.17"
+          uv pip compile --python-version 3.11 --universal --generate-hashes \
+            --output-file requirements.lock requirements.txt
+          uv pip compile --python-version 3.11 --universal --generate-hashes \
+            --output-file requirements-dev.lock requirements-dev.txt
+          uv pip compile --python-version 3.11 --universal --generate-hashes \
+            --output-file requirements-migration.lock requirements-migration.txt
+          git diff --exit-code -- requirements.lock requirements-dev.lock requirements-migration.lock
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements-dev.lock
+
+      - name: Compile source
+        run: python -m compileall -q .
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Audit dependencies
+        run: python -m pip_audit -r requirements.lock
+
+  compose-smoke:
+    name: Compose PostgreSQL smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare isolated paper configuration
+        run: |
+          cp .env.example .env
+          cp .env.bot.example .env.bot
+          cp .env.dashboard.example .env.dashboard
+
+      - name: Validate local and external Compose models
+        run: |
+          docker compose config --quiet
+          POSTGRES_CA_FILE=/etc/ssl/certs/ca-certificates.crt \
+            docker compose -f docker-compose.yml -f docker-compose.production.yml config --quiet
+          ! POSTGRES_CA_FILE=/etc/ssl/certs/ca-certificates.crt \
+            docker compose -f docker-compose.yml -f docker-compose.production.yml config --services \
+            | grep -qx postgres
+
+      - name: Build and smoke PostgreSQL state only
+        run: |
+          docker compose build bot
+          docker compose up --wait --wait-timeout 60 postgres
+          docker compose run --rm --no-deps bot python -c "from config import Config; from state import StateStore; config = Config.from_env(); state = StateStore(config); assert state.ping(); state.close(); print('postgres-state-smoke-ok')"
+
+      - name: Clean up Compose resources
+        if: always()
+        run: docker compose down --volumes --remove-orphans

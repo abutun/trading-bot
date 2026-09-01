@@ -1,7 +1,35 @@
+# Local configuration and secrets. Keep the tracked template available.
 .env
+.env.*
+!.env.example
+!.env.bot.example
+!.env.dashboard.example
+!.env.migration.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+
+# Python, test, and build artifacts.
 .venv/
+venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+uv.lock
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Runtime and generated artifacts.
 .DS_Store
 *.db
-bot.log
+*.sqlite*
+*.log
+graphify-out/

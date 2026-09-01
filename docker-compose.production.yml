@@ -1,0 +1,31 @@
+# Production overlay for an externally operated, TLS-protected PostgreSQL
+# service.  Invoke with both files; do not launch the local `postgres` service
+# on a server that uses this overlay.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.production.yml up -d
+#
+# POSTGRES_DSN and POSTGRES_SSLROOTCERT remain in each service's isolated
+# env_file. POSTGRES_CA_FILE is a host path used only to mount the public CA
+# certificate read-only at /run/secrets/postgres-ca.pem.
+services:
+  # Keeping the local development database behind a profile ensures a plain
+  # `up` with this overlay cannot accidentally start an insecure local state
+  # store beside the managed production database.
+  postgres:
+    profiles: ["local-postgres"]
+
+  bot:
+    depends_on: !reset []
+    secrets:
+      - source: postgres_ca
+        target: postgres-ca.pem
+
+  dashboard:
+    depends_on: !reset []
+    secrets:
+      - source: postgres_ca
+        target: postgres-ca.pem
+
+secrets:
+  postgres_ca:
+    file: ${POSTGRES_CA_FILE:?set POSTGRES_CA_FILE to the absolute PostgreSQL CA certificate path}

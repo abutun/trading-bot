@@ -1,18 +1,19 @@
-ccxt>=4.3.0
-web3>=6.15.0
-eth-account>=0.10.0
-python-dotenv>=1.0.0
-pandas>=2.0.0
-numpy>=1.24.0
+ccxt>=4.4.0,<5.0.0
+web3>=7.0.0,<8.0.0
+eth-account>=0.13.0,<0.15.0
+python-dotenv>=1.0.0,<2.0.0
+pandas>=2.1.0,<3.0.0
+numpy>=1.26.0,<3.0.0
 
 # State database (PostgreSQL)
-psycopg[binary]>=3.2.0,<4
+psycopg[binary]>=3.2.0,<3.3.0
 
-# Polymarket CLOB / market-data SDK
-polymarket-client>=0.7.0,<0.8
+# Polymarket CLOB SDK (v2)
+py-clob-client-v2>=1.0.0,<1.2.0
 
 # Monitoring dashboard
-flask>=3.0.0
+flask>=3.0.0,<3.2.0
+gunicorn>=23.0.0,<27.0.0
 
 # Optional, only if using SECRET_MANAGER=aws
-# boto3>=1.28
+# boto3>=1.28,<2.0.0

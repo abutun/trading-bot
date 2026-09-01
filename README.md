@@ -1,194 +1,190 @@
 # Trading Bot
 
-Python trading bot with one strategy engine and three execution venues:
+Production-oriented Python trading bot for three execution venues:
 
-- **Binance Spot** through ccxt
-- **EVM / MetaMask wallet** through web3.py and a configured DEX router
-- **Polymarket CLOB** through the official `polymarket-client` Python SDK
+- Binance Spot through CCXT
+- an EVM DEX router using a dedicated MetaMask-compatible signing key
+- Polymarket CLOB V2 on Polygon
 
-The bot persists state in **PostgreSQL**. It supports paper trading, historical
-backtests, a login-protected monitoring dashboard, ATR-based stops, a daily-loss
-limit, and a total-drawdown kill switch.
+The bot keeps positions, trades, equity, heartbeats, price snapshots, and
+durable order intents in PostgreSQL. It is deliberately **fail-closed**: it
+will stop new automation rather than guess after stale data, a database fault,
+an unknown order outcome, or an unsafe fill.
 
-> This software sends financial orders. It is not investment advice and it
-> cannot guarantee a profit. Start in paper mode and use dedicated, low-balance
-> trading wallets and least-privilege API keys.
+> This software can send real financial orders. It is not investment advice or
+> a guarantee of profit. Start with paper trading and dedicated low-balance
+> accounts. Do not use a primary exchange account or primary wallet.
 
-## Important safety behaviour
+## What is protected
 
-- Every external order is first written to PostgreSQL as a durable **order
-  intent**. A timeout or crash leaves it unresolved; the bot blocks only that
-  pair rather than risking a duplicate order on restart.
-- A zero-fill or partial sell never deletes the tracked position. A partial fill
-  reduces the stored quantity; a failed fill keeps it unchanged.
-- Signals use completed candles by default (`USE_CLOSED_CANDLES=true`). The
-  live price still drives stop-loss/take-profit checks.
-- EVM allowance defaults to the exact swap amount. Set `EVM_APPROVE_MAX=true`
-  only if you consciously accept an unlimited ERC-20 allowance.
+| Risk | Runtime behaviour |
+|---|---|
+| Duplicate order after timeout/crash | A PostgreSQL order intent is committed before submission. Any ambiguous outcome becomes `unknown` and blocks the entire bot until reconciled. |
+| Stale/malformed prices | All OHLCV input is finite/consistent and must be fresh before a decision. No entry-price fallback is used for live risk decisions. |
+| Price gap / slippage | Binance uses IOC limit orders; EVM and Polymarket enforce executable price bounds; every reported fill is checked again against `MAX_ORDER_SLIPPAGE_BPS`. |
+| Two bot instances | A PostgreSQL advisory lock permits exactly one active trading loop for the same database. |
+| EVM misconfiguration | RPC chain ID, router bytecode, gas price/limit caps, confirmation count, and pre-trade router quote are verified. |
+| Dashboard secret leakage | Docker uses separate bot and dashboard environment files. The dashboard does not receive venue or wallet credentials. |
 
-## Quick start
+Bot-managed stop/take-profit rules are **not native exchange stop orders**.
+The bot must remain healthy and receive fresh data to execute them. Use venue-
+native protection separately if your strategy or venue supports it.
+
+## Quick start: paper mode
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install --require-hashes -r requirements-dev.lock
 
 cp .env.example .env
-# Set POSTGRES_*, DASHBOARD_*, and the venue settings you will use.
-
-python main.py              # paper mode by default
-python dashboard.py         # in another terminal
+# Replace POSTGRES_PASSWORD before use.
+python main.py --backtest
 ```
 
-Create a PostgreSQL database and restricted application user first:
-
-```sql
-CREATE USER tradingbot WITH PASSWORD 'use-a-long-random-password';
-CREATE DATABASE trading_bot OWNER tradingbot;
-```
-
-For a local containerized PostgreSQL instance instead:
+For the supported container stack, keep configuration separated:
 
 ```bash
+cp .env.example .env                 # Compose variables, including POSTGRES_PASSWORD
+cp .env.bot.example .env.bot         # bot-only credentials and limits
+cp .env.dashboard.example .env.dashboard
+# Make POSTGRES_PASSWORD identical in all three local files.
+
 docker compose up -d postgres
+docker compose run --rm bot python main.py --preflight
+docker compose up -d bot dashboard
 ```
 
-The state schema is created automatically on the bot or dashboard’s first
-connection. The reviewed schema is also available in
-[`migrations/001_initial.sql`](migrations/001_initial.sql).
+Those commands intentionally start the local Compose PostgreSQL service. A
+server deployment uses the external-TLS
+[`docker-compose.production.yml`](docker-compose.production.yml) overlay and
+does not start local PostgreSQL; follow the exact certificate and DSN setup in
+[PRODUCTION.md](PRODUCTION.md).
 
-## Configuration
+The dashboard binds only to `127.0.0.1` by default. Use a TLS reverse proxy
+for remote access; do not expose Gunicorn directly to the Internet.
 
-Copy `.env.example`; do not commit a filled `.env` file. `POSTGRES_DSN` takes
-precedence over the individual `POSTGRES_*` variables.
+## Live trading gate
 
-| Group | Key settings |
-|---|---|
-| Core | `BOT_MODE`, `TRADING_PAIRS`, `INTERVAL`, `LOOP_SECONDS`, `USE_CLOSED_CANDLES` |
-| Strategy | `EMA_FAST`, `EMA_SLOW`, `RSI_PERIOD`, `ATR_PERIOD`, ATR multipliers |
-| Risk | `MAX_POSITION_PCT`, `MAX_DAILY_LOSS_PCT`, `MAX_TOTAL_DRAWDOWN_PCT`, `MIN_NOTIONAL_USD` |
-| PostgreSQL | `POSTGRES_DSN` or `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DATABASE`, `POSTGRES_SSLMODE` |
-| Dashboard | `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, `DASHBOARD_SECRET_KEY`, `DASHBOARD_SECURE_COOKIES` |
-
-`TRADING_PAIRS` takes comma-separated `venue:symbol` values. Valid venues are
-`binance`, `evm`, and `polymarket`. Pair IDs are venue-scoped, so the same
-symbol can safely be used on multiple venues.
-
-## Binance
+Live mode cannot start accidentally. It requires all of the following:
 
 ```dotenv
 BOT_MODE=live
+LIVE_TRADING_CONFIRMATION=I_UNDERSTAND_LIVE_TRADING_RISK
+```
+
+Then run the non-ordering validation command first:
+
+```bash
+python main.py --preflight
+```
+
+`--preflight` verifies PostgreSQL, the single-instance lock, configured
+positions, fresh market data, and account equity. It never creates or submits
+an order. Use `--once` only after paper/testnet validation to execute one
+fully guarded cycle.
+
+Detailed deployment, recovery, database-role, and rollback instructions are
+in [PRODUCTION.md](PRODUCTION.md). Local setup and migration instructions are
+in [SETUP.md](SETUP.md).
+
+## Venue configuration
+
+### Binance Spot
+
+```dotenv
 TRADING_PAIRS=binance:BTC/USDT
 BINANCE_API_KEY=...
 BINANCE_API_SECRET=...
 BINANCE_TESTNET=true
+BINANCE_ORDER_MODE=ioc_limit
 ```
 
-Use testnet before mainnet. Create a Spot-only key, disable withdrawals, and
-use IP allowlisting where Binance supports it.
+Live Binance orders are IOC limit orders, never unbounded market orders. Use a
+Spot-only key with withdrawals disabled and IP allowlisting wherever Binance
+supports it. Testnet must pass preflight and a paper soak before switching
+`BINANCE_TESTNET=false`.
 
-## EVM / MetaMask
-
-The EVM broker swaps ERC-20 tokens through a Uniswap V2-compatible router. Use
-wrapped native tokens (for example WETH) rather than native ETH.
+### EVM / MetaMask-compatible signer
 
 ```dotenv
-BOT_MODE=live
 TRADING_PAIRS=evm:ETH/USDT
-EVM_PRIVATE_KEY=0x...
+EVM_PRIVATE_KEY=0x...                 # exported dedicated hot-wallet key
 EVM_RPC_URL=https://your-rpc.example
 EVM_CHAIN_ID=1
 EVM_ROUTER_ADDRESS=0x...
 EVM_SYMBOLS={"ETH/USDT":{"base":"0xWETH","quote":"0xUSDC"}}
-EVM_APPROVE_MAX=false
+EVM_MAX_GAS_PRICE_GWEI=100
+EVM_MAX_GAS_LIMIT=600000
+EVM_MIN_CONFIRMATIONS=1
+EVM_SLIPPAGE_BPS=50
 ```
 
-The configured private key is a MetaMask-compatible key. Use a dedicated hot
-wallet that contains only the swap capital and native gas token required for
-trading.
+This is server-side signing with a key exported from a dedicated MetaMask
+account; it does not control the MetaMask browser extension. Use ERC-20 tokens
+(for example WETH, not native ETH), verify every router/token contract for the
+target chain, and keep only trading capital plus gas in that wallet. The bot
+refuses a router quote outside `MAX_ORDER_SLIPPAGE_BPS` before broadcast.
 
-## Polymarket
+### Polymarket CLOB V2
 
-Polymarket pairs trade a single **outcome token** (YES or NO), rather than a
-crypto ticker. The public price-history API provides sampled prices; the bot
-converts those to synthetic OHLC bars for the existing EMA/RSI/ATR strategy.
-Synthetic bars have no real volume, so validate this strategy separately in
-paper mode before going live.
-
-```dotenv
-BOT_MODE=paper
-TRADING_PAIRS=polymarket:example-yes
-POLYMARKET_MARKETS={"example-yes":{"token_id":"<YES_OUTCOME_TOKEN_ID>"}}
-POLYMARKET_HISTORY_INTERVAL=1d
-POLYMARKET_FIDELITY_MINUTES=15
-```
-
-Live trading needs a dedicated Polygon/MetaMask signer. `POLYMARKET_WALLET_ADDRESS`
-is optional for a direct EOA, and required when the account wallet differs from
-the signer. A Relayer key is optional but recommended for supported gasless
-Deposit Wallet operations:
+`POLYMARKET_MARKETS` maps an app-local alias to one conditional-token outcome
+ID (YES or NO), not a market slug:
 
 ```dotenv
-BOT_MODE=live
 TRADING_PAIRS=polymarket:example-yes
+POLYMARKET_MARKETS={"example-yes":{"token_id":"<outcome-token-id>"}}
 POLYMARKET_PRIVATE_KEY=0x...
-POLYMARKET_WALLET_ADDRESS=0x...
-POLYMARKET_RELAYER_API_KEY=...
-POLYMARKET_RELAYER_API_KEY_ADDRESS=0x...
+POLYMARKET_API_KEY=...
+POLYMARKET_API_SECRET=...
+POLYMARKET_API_PASSPHRASE=...
+POLYMARKET_SIGNATURE_TYPE=0
 POLYMARKET_SLIPPAGE_BPS=100
-POLYMARKET_MARKETS={"example-yes":{"token_id":"<YES_OUTCOME_TOKEN_ID>"}}
 ```
 
-Buys and sells use fill-or-kill market orders: a requested order either fills
-fully or is rejected, preventing the strategy from silently carrying a partial
-outcome position. Before trading, fund the account with pUSD and complete the
-Polymarket trading-approval setup. See the official [Python SDK guide](https://docs.polymarket.com/getting-started/python), [wallet/authentication guide](https://docs.polymarket.com/trading/wallets-auth), and [order guide](https://docs.polymarket.com/trading/place-orders).
+The integration uses `py-clob-client-v2`, the current V2 API. It creates
+price-bounded FOK orders and accepts only a terminal exact fill; delayed,
+partial, malformed, or transport-ambiguous responses halt automation for
+manual reconciliation. Set all three API credentials together, or deliberately
+enable `POLYMARKET_DERIVE_API_CREDENTIALS=true`. For proxy/safe signatures,
+also set `POLYMARKET_FUNDER_ADDRESS`.
 
-## MySQL to PostgreSQL migration
+Read Polymarket’s official [V2 migration guide](https://docs.polymarket.com/v2-migration), [trading overview](https://docs.polymarket.com/trading/overview), and [order management guide](https://docs.polymarket.com/trading/manage-orders) before funding an account. Price history is sampled outcome-token data converted to synthetic OHLC bars; it has no real volume and must be validated in paper mode.
 
-1. Stop both the bot and dashboard to freeze writes.
-2. Back up the MySQL source database.
-3. Configure the target `POSTGRES_*` variables alongside the legacy source
-   `MYSQL_*` variables in a local migration-only env file.
-4. Install the migration dependency and run the script:
+## PostgreSQL and MySQL migration
+
+PostgreSQL is the only runtime database. The reviewed schema is
+[`migrations/001_initial.sql`](migrations/001_initial.sql); the bot initializes
+it, while the dashboard intentionally uses no DDL privileges.
+
+For a one-time legacy MySQL copy:
 
 ```bash
-pip install -r requirements-migration.txt
+cp .env.migration.example .env.migration
+# Fill MYSQL_* source and POSTGRES_* target values.
+python -m pip install --require-hashes -r requirements-migration.lock
 python scripts/migrate_mysql_to_postgres.py --env-file .env.migration
 ```
 
-The script refuses a non-empty PostgreSQL `positions` table, copies positions,
-trades, metadata, and equity history in one transaction, and preserves the old
-trade/equity IDs. It does not delete or alter the MySQL source.
+Stop bot and dashboard first, back up MySQL, and use an empty PostgreSQL target.
+The selected `--env-file` replaces the process environment rather than merging
+with it, so an ambient shell cannot redirect the copy. The copy is transactional
+for positions, trades, metadata, and equity history; it never alters the MySQL
+source. It refuses legacy non-terminal/unknown orders and carried positions
+without finite `0 < stop-loss < entry < take-profit` protection; reconcile
+those at the venue before migrating.
 
-After checking PostgreSQL row counts and dashboard values, remove the `MYSQL_*`
-secrets and use the normal `.env` with only PostgreSQL settings.
-
-## Running and monitoring
-
-```bash
-BOT_MODE=paper python main.py
-python main.py --backtest
-python dashboard.py
-```
-
-The dashboard binds to `127.0.0.1:8080` by default. It requires both
-`DASHBOARD_PASSWORD` and a random `DASHBOARD_SECRET_KEY` (for example
-`openssl rand -hex 32`). If TLS terminates upstream, keep
-`DASHBOARD_SECURE_COOKIES=false` only for local HTTP development; set it to
-`true` whenever users access the dashboard over HTTPS, including via a TLS
-reverse proxy.
-
-The dashboard lists unresolved orders prominently. Reconcile those manually in
-the venue before any database change: inspect the venue order/transaction,
-correct the position and trade history if necessary, then mark the corresponding
-`orders` row with its verified terminal outcome. This conservative stop is
-intentional—blind retries are unsafe for live trading.
-
-## Tests
+## Tests and quality checks
 
 ```bash
-python -m unittest discover -s tests -v
+python -m pytest
+python -m ruff check .
+python -m pip_audit -r requirements.lock
 python -m compileall -q .
 ```
+
+GitHub Actions runs the same Python 3.11 checks on pushes and pull requests.
+`requirements.txt` and `requirements-dev.txt` are reviewed input manifests;
+the exact, hash-verified locks are regenerated deliberately during dependency
+updates.

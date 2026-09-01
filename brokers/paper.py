@@ -26,7 +26,11 @@ class PaperBroker(Broker):
         equity = self._cash()
 
         for pos in self.state.get_positions_by_venue(self.venue):
-            price = prices.get(pos.symbol, pos.entry_price)
+            # MarketData and all live brokers key prices by the durable pair
+            # identifier (``venue:symbol``), not just the local symbol.
+            # Looking up `pos.symbol` silently valued every paper position at
+            # its entry price and could hide a risk-limit breach.
+            price = prices.get(pos.pair_id, pos.entry_price)
             equity += pos.qty * price
 
         return equity
@@ -56,7 +60,12 @@ class PaperBroker(Broker):
         self._set_cash(cash - cost)
 
         fee = qty * fill_price * self.config.fee_rate
-        return ExecutionResult(qty=qty, price=fill_price, fee=fee)
+        return ExecutionResult(
+            qty=qty,
+            price=fill_price,
+            fee=fee,
+            order_id=f"paper:{client_order_id}" if client_order_id else "",
+        )
 
     def sell(
         self,
@@ -74,4 +83,9 @@ class PaperBroker(Broker):
         self._set_cash(self._cash() + proceeds)
 
         fee = qty * fill_price * self.config.fee_rate
-        return ExecutionResult(qty=qty, price=fill_price, fee=fee)
+        return ExecutionResult(
+            qty=qty,
+            price=fill_price,
+            fee=fee,
+            order_id=f"paper:{client_order_id}" if client_order_id else "",
+        )

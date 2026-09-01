@@ -6,7 +6,7 @@ from config import Config
 
 
 def main() -> None:
-    config = Config.from_env()
+    config = Config.from_env(runtime_role="dashboard")
 
     logging.basicConfig(
         level=getattr(logging, config.log_level.upper(), logging.INFO),
